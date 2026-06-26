@@ -1,0 +1,112 @@
+name: gaze_wam
+
+image_size: [256, 256]
+image_shape: [3, 256, 256]
+image_resize_mode: stretch
+robot_dataset_path: data/gaze_wam_robot.zarr
+open_dataset_path: data/gaze_wam_open.zarr
+
+n_obs_steps: 2
+n_latency_steps: 0
+obs_downsample_steps: 1
+action_downsample_steps: 1
+action_horizon: 16
+action_dim: 10
+action_representation: relative
+use_absolute_action: true
+action_padding: true
+heatmap_num_tokens: 256
+# FastWAM/LDM-style heatmap side denoises compact latent tokens, then decodes to
+# a full-resolution 256x256 heatmap for DSNT/JS loss and previews. The canonical
+# path uses frozen Cosmos-Tokenizer-CI16x16 latents: 16x16 tokens with 16 latent
+# channels per token, equivalent to a [C=16, H=16, W=16] latent map.
+heatmap_dim: 16
+heatmap_token_grid: [16, 16]
+heatmap_sigma_tokens: 1.25
+temporal_heatmap_mode: off
+temporal_heatmap_window_radius: 30
+temporal_heatmap_beta: 10.0
+temporal_heatmap_sigma_px: 6.0
+temporal_heatmap_current_weight: 1.0
+seed: 42
+val_ratio: 0.02
+
+camera_key: camera0_rgb
+gaze_key: gaze_xy
+# Heatmap supervision is generated online from normalized gaze_xy for the
+# DSNT/JS full-resolution objective. Keep zarr heatmap storage optional.
+heatmap_key: null
+action_abs_key: action_abs_tcp
+tcp_pose_key: tcp_pose_abs
+gripper_key: gripper_width
+gaze_is_normalized: true
+
+robot_gaze_dropout_prob: 0.2
+robot_heatmap_on_gaze_dropout: true
+
+shape_meta: &shape_meta
+  obs:
+    camera0_rgb:
+      shape: ${task.image_shape}
+      type: rgb
+      horizon: ${task.n_obs_steps}
+  action:
+    shape:
+      - ${task.action_dim}
+    horizon: ${task.action_horizon}
+
+robot_dataset:
+  _target_: diffusion_policy.dataset.gaze_wam_dataset.GazeWamRobotDataset
+  dataset_path: ${task.robot_dataset_path}
+  camera_key: ${task.camera_key}
+  gaze_key: ${task.gaze_key}
+  heatmap_key: ${task.heatmap_key}
+  n_obs_steps: ${task.n_obs_steps}
+  n_latency_steps: ${task.n_latency_steps}
+  obs_downsample_steps: ${task.obs_downsample_steps}
+  action_downsample_steps: ${task.action_downsample_steps}
+  action_horizon: ${task.action_horizon}
+  image_size: ${task.image_size}
+  image_resize_mode: ${task.image_resize_mode}
+  heatmap_token_grid: ${task.heatmap_token_grid}
+  heatmap_dim: ${task.heatmap_dim}
+  heatmap_sigma_tokens: ${task.heatmap_sigma_tokens}
+  temporal_heatmap_mode: ${task.temporal_heatmap_mode}
+  temporal_heatmap_window_radius: ${task.temporal_heatmap_window_radius}
+  temporal_heatmap_beta: ${task.temporal_heatmap_beta}
+  temporal_heatmap_sigma_px: ${task.temporal_heatmap_sigma_px}
+  temporal_heatmap_current_weight: ${task.temporal_heatmap_current_weight}
+  action_abs_key: ${task.action_abs_key}
+  tcp_pose_key: ${task.tcp_pose_key}
+  gripper_key: ${task.gripper_key}
+  gaze_is_normalized: ${task.gaze_is_normalized}
+  action_padding: ${task.action_padding}
+  seed: ${task.seed}
+  val_ratio: ${task.val_ratio}
+
+open_dataset:
+  _target_: diffusion_policy.dataset.gaze_wam_dataset.GazeWamOpenDataset
+  dataset_path: ${task.open_dataset_path}
+  camera_key: ${task.camera_key}
+  gaze_key: ${task.gaze_key}
+  heatmap_key: ${task.heatmap_key}
+  n_obs_steps: ${task.n_obs_steps}
+  n_latency_steps: ${task.n_latency_steps}
+  obs_downsample_steps: ${task.obs_downsample_steps}
+  action_downsample_steps: ${task.action_downsample_steps}
+  action_horizon: ${task.action_horizon}
+  action_dim: ${task.action_dim}
+  image_size: ${task.image_size}
+  image_resize_mode: ${task.image_resize_mode}
+  heatmap_token_grid: ${task.heatmap_token_grid}
+  heatmap_dim: ${task.heatmap_dim}
+  heatmap_sigma_tokens: ${task.heatmap_sigma_tokens}
+  temporal_heatmap_mode: ${task.temporal_heatmap_mode}
+  temporal_heatmap_window_radius: ${task.temporal_heatmap_window_radius}
+  temporal_heatmap_beta: ${task.temporal_heatmap_beta}
+  temporal_heatmap_sigma_px: ${task.temporal_heatmap_sigma_px}
+  temporal_heatmap_current_weight: ${task.temporal_heatmap_current_weight}
+  gaze_is_normalized: ${task.gaze_is_normalized}
+  action_padding: ${task.action_padding}
+  seed: ${task.seed}
+  val_ratio: ${task.val_ratio}

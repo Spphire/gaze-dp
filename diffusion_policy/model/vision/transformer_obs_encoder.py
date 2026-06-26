@@ -10,6 +10,7 @@ import logging
 
 from diffusion_policy.model.common.module_attr_mixin import ModuleAttrMixin
 
+from diffusion_policy.common.gaze_wam_training_config import normalize_gaze_wam_bool_field
 from diffusion_policy.common.pytorch_util import replace_submodules
 
 logger = logging.getLogger(__name__)
@@ -64,7 +65,11 @@ class TransformerObsEncoder(ModuleAttrMixin):
             # use single rgb model for all rgb inputs
             share_rgb_model: bool=False,
             feature_aggregation: str=None,
-            downsample_ratio: int=32
+            downsample_ratio: int=32,
+            pretrained_cfg=None,
+            pretrained_cfg_overlay=None,
+            checkpoint_path: str='',
+            cache_dir: str=''
         ):
         """
         Assumes rgb input: B,T,C,H,W
@@ -80,13 +85,51 @@ class TransformerObsEncoder(ModuleAttrMixin):
         key_shape_map = dict()
 
         assert global_pool == ''
-        model = timm.create_model(
+        pretrained = normalize_gaze_wam_bool_field(
+            "policy.obs_encoder.pretrained",
+            pretrained,
+            default=False,
+        )
+        frozen = normalize_gaze_wam_bool_field(
+            "policy.obs_encoder.frozen",
+            frozen,
+            default=False,
+        )
+        use_group_norm = normalize_gaze_wam_bool_field(
+            "policy.obs_encoder.use_group_norm",
+            use_group_norm,
+            default=False,
+        )
+        share_rgb_model = normalize_gaze_wam_bool_field(
+            "policy.obs_encoder.share_rgb_model",
+            share_rgb_model,
+            default=False,
+        )
+        create_kwargs = dict(
             model_name=model_name,
             pretrained=pretrained,
             global_pool=global_pool, # '' means no pooling
             num_classes=0            # remove classification layer
         )
+        if pretrained_cfg is not None:
+            create_kwargs["pretrained_cfg"] = pretrained_cfg
+        if pretrained_cfg_overlay is not None:
+            create_kwargs["pretrained_cfg_overlay"] = pretrained_cfg_overlay
+        if checkpoint_path:
+            create_kwargs["checkpoint_path"] = checkpoint_path
+        if cache_dir:
+            create_kwargs["cache_dir"] = cache_dir
+        model = timm.create_model(**create_kwargs)
         self.model_name = model_name
+        self.pretrained = pretrained
+        self.pretrained_cfg_name = pretrained_cfg
+        self.pretrained_cfg_overlay = pretrained_cfg_overlay
+        self.checkpoint_path = checkpoint_path
+        self.cache_dir = cache_dir
+        self.timm_pretrained_cfg = getattr(model, "pretrained_cfg", None)
+        patch_embed = getattr(model, "patch_embed", None)
+        self.patch_size = getattr(patch_embed, "patch_size", None)
+        self.model_input_size = getattr(patch_embed, "img_size", None)
 
         if frozen:
             assert pretrained
@@ -128,14 +171,16 @@ class TransformerObsEncoder(ModuleAttrMixin):
             
         # handle feature aggregation
         self.feature_aggregation = feature_aggregation
+        self.downsample_ratio = downsample_ratio
         if model_name.startswith('vit'):
             # assert self.feature_aggregation is None # vit uses the CLS token
             if self.feature_aggregation is None:
                 # Use all tokens from ViT
                 pass
-            elif self.feature_aggregation != 'cls':
+            elif self.feature_aggregation not in ('cls', 'patch'):
                 logger.warn(f'vit will use the CLS token. feature_aggregation ({self.feature_aggregation}) is ignored!')
                 self.feature_aggregation = 'cls'
+            self.num_prefix_tokens = getattr(model, 'num_prefix_tokens', 1)
         
         if self.feature_aggregation == 'soft_attention':
             self.attention = nn.Sequential(
@@ -230,6 +275,8 @@ class TransformerObsEncoder(ModuleAttrMixin):
             # vit uses the CLS token
             if self.feature_aggregation == 'cls':
                 return feature[:, [0], :]
+            if self.feature_aggregation == 'patch':
+                return feature[:, self.num_prefix_tokens:, :]
             
             # or use all tokens
             assert self.feature_aggregation is None 

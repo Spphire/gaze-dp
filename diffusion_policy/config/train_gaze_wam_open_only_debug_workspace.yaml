@@ -1,0 +1,54 @@
+defaults:
+  - train_gaze_wam_open_only_workspace
+  - _self_
+
+name: train_gaze_wam_open_only_debug
+exp_name: "open_only_debug"
+
+task:
+  robot_dataset_path: data/debug_gaze_wam/robot.zarr
+  open_dataset_path: data/debug_gaze_wam/open.zarr
+
+policy:
+  obs_encoder:
+    pretrained: false
+  num_inference_steps: 2
+  n_layer: 1
+  n_head: 4
+  p_drop_emb: 0.0
+  p_drop_attn: 0.0
+
+open_dataloader:
+  batch_size: 4
+  num_workers: 0
+  pin_memory: false
+  persistent_workers: false
+
+val_open_dataloader:
+  batch_size: 4
+  num_workers: 0
+  pin_memory: false
+  persistent_workers: false
+
+training:
+  debug: true
+  require_amp: false
+  num_epochs: 1
+  max_train_steps: 2
+  use_ema: false
+  freeze_encoder: false
+  checkpoint_every: 1000
+  val_every: 1
+  max_val_steps: 1
+  val_mixing_seed: 100003
+  sample_every: 1000
+  save_val_heatmap_preview: true
+  val_heatmap_preview_max_samples: 2
+  lr_warmup_steps: 1
+
+logging:
+  mode: disabled
+
+checkpoint:
+  save_last_ckpt: false
+  save_last_snapshot: false

@@ -1,7 +1,10 @@
 """
 Usage:
 Training:
-python train.py --config-name=train_diffusion_lowdim_workspace
+python train.py --config-name=train_gaze_wam_workspace task=gaze_wam
+
+Server 8-GPU AMP training should use:
+bash train_scripts/start_open_only_8gpu_tmux.sh
 """
 
 import sys
@@ -17,6 +20,24 @@ from diffusion_policy.workspace.base_workspace import BaseWorkspace
 # allows arbitrary python code execution in configs using the ${eval:''} resolver
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
+ALLOWED_WORKSPACE_TARGETS = frozenset(
+    {
+        "diffusion_policy.workspace.train_gaze_wam_workspace.TrainGazeWamWorkspace",
+    }
+)
+
+
+def _validate_workspace_target(cfg: OmegaConf) -> str:
+    target = OmegaConf.select(cfg, "_target_")
+    if target not in ALLOWED_WORKSPACE_TARGETS:
+        allowed = ", ".join(sorted(ALLOWED_WORKSPACE_TARGETS))
+        raise ValueError(
+            "This repository entrypoint is restricted to Gaze-WAM training. "
+            f"Got _target_={target!r}; allowed targets: {allowed}."
+        )
+    return str(target)
+
+
 @hydra.main(
     version_base=None,
     config_path=str(pathlib.Path(__file__).parent.joinpath(
@@ -27,7 +48,8 @@ def main(cfg: OmegaConf):
     # will use the same time.
     OmegaConf.resolve(cfg)
 
-    cls = hydra.utils.get_class(cfg._target_)
+    target = _validate_workspace_target(cfg)
+    cls = hydra.utils.get_class(target)
     workspace: BaseWorkspace = cls(cfg)
     workspace.run()
 

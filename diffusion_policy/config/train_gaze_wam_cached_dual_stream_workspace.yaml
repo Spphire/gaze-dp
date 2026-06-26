@@ -1,0 +1,16 @@
+defaults:
+  - train_gaze_wam_workspace
+  - _self_
+
+name: train_gaze_wam_cached_dual_stream
+exp_name: "cached_dual_stream_fullres_heatmap"
+
+task:
+  heatmap_dim: 16
+
+policy:
+  model_architecture: cached_dual_stream
+  heatmap_dim: ${task.heatmap_dim}
+  heatmap_objective: dsnt_js
+  heatmap_spatial_decoder: cosmos_tokenizer
+  use_block_attention_mask: true

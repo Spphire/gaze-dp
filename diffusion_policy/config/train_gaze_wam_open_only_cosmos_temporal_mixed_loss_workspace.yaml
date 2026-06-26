@@ -1,0 +1,15 @@
+defaults:
+  - train_gaze_wam_open_only_cosmos_temporal_delta_noise_workspace
+  - _self_
+
+name: train_gaze_wam_open_only_cosmos_temporal_mixed_loss
+exp_name: "open_only_frozen_cosmos_temporal_window_mixed_loss"
+
+policy:
+  heatmap_objective: diffusion
+  heatmap_loss_weight: 1.0
+  heatmap_token_kl_loss_weight: 0.0
+  heatmap_diffusion_final_loss_enabled: true
+  heatmap_final_loss_timestep_weighting: alpha_cumprod
+  heatmap_xy_loss_weight: 0.05
+  heatmap_js_loss_weight: 0.10

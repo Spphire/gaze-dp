@@ -1,0 +1,205 @@
+defaults:
+  - _self_
+  - task: gaze_wam
+
+name: train_gaze_wam
+_target_: diffusion_policy.workspace.train_gaze_wam_workspace.TrainGazeWamWorkspace
+
+task_name: ${task.name}
+shape_meta: ${task.shape_meta}
+exp_name: "default"
+
+n_emb: 768
+
+policy:
+  _target_: diffusion_policy.policy.gaze_wam_policy.GazeWamPolicy
+  shape_meta: ${shape_meta}
+
+  noise_scheduler:
+    _target_: diffusers.DDIMScheduler
+    num_train_timesteps: 50
+    beta_start: 0.0001
+    beta_end: 0.02
+    beta_schedule: squaredcos_cap_v2
+    clip_sample: true
+    set_alpha_to_one: true
+    steps_offset: 0
+    prediction_type: epsilon
+
+  obs_encoder:
+    _target_: diffusion_policy.model.vision.transformer_obs_encoder.TransformerObsEncoder
+    shape_meta: ${shape_meta}
+    model_name: vit_base_patch16_dinov3
+    pretrained_cfg: null
+    pretrained_cfg_overlay: null
+    checkpoint_path: ''
+    cache_dir: ''
+    global_pool: ''
+    n_emb: ${n_emb}
+    pretrained: true
+    frozen: false
+    feature_aggregation: patch
+    downsample_ratio: 16
+    transforms:
+      - _target_: torchvision.transforms.ColorJitter
+        brightness: 0.2
+        contrast: 0.2
+        saturation: 0.2
+        hue: 0.04
+      - _target_: torchvision.transforms.Normalize
+        mean: [0.485, 0.456, 0.406]
+        std: [0.229, 0.224, 0.225]
+    use_group_norm: false
+    share_rgb_model: false
+
+  gaze_encoder:
+    _target_: diffusion_policy.model.gaze_wam.gaze_encoder.GazeConditionEncoder
+    embed_dim: ${n_emb}
+    grid_size: [8, 8]
+    sigma: 0.15
+
+  num_inference_steps: 8
+  input_pertub: 0.1
+  action_loss_weight: 1.0
+  heatmap_loss_weight: 1.0
+  heatmap_token_kl_loss_weight: 0.0
+  heatmap_objective: dsnt_js
+  heatmap_xy_loss_weight: 1.0
+  heatmap_point_nll_loss_weight: 0.0
+  heatmap_js_loss_weight: 1.0
+  heatmap_diffusion_final_loss_enabled: false
+  heatmap_final_loss_timestep_weighting: none
+  heatmap_dsnt_temperature: 0.1
+  heatmap_distribution_mode: intensity_softplus
+  heatmap_dsnt_target_sigma_px: 6.0
+  cfg_scale: 1.0
+  model_architecture: cached_dual_stream
+  n_layer: 7
+  n_head: 8
+  n_emb: ${n_emb}
+  p_drop_emb: 0.1
+  p_drop_attn: 0.1
+  max_image_tokens: ${eval:'${task.n_obs_steps} * 256'}
+  heatmap_num_tokens: ${task.heatmap_num_tokens}
+  heatmap_dim: ${task.heatmap_dim}
+  heatmap_token_grid: ${task.heatmap_token_grid}
+  heatmap_image_size: [256, 256]
+  heatmap_sigma_tokens: 1.25
+  heatmap_decode_method: gaussian_splat
+  heatmap_spatial_decoder: cosmos_tokenizer
+  heatmap_cosmos_encoder_path: data/checkpoints/cosmos_tokenizer/Cosmos-Tokenizer-CI16x16/encoder.jit
+  heatmap_cosmos_decoder_path: data/checkpoints/cosmos_tokenizer/Cosmos-Tokenizer-CI16x16/decoder.jit
+  heatmap_cosmos_input_range: minus_one_one
+  heatmap_cosmos_output_range: minus_one_one
+  heatmap_cosmos_input_normalization: max
+  # Fixed affine map from raw frozen-Cosmos heatmap latents into DDIM scheduler
+  # space. HOT3D open stats over 4096 random gaze heatmaps give
+  # raw min/max ~= [-3.921875, 3.375], so scale=0.25 keeps the observed label
+  # range inside [-1, 1] while scheduler clipping prevents runaway predictions.
+  heatmap_latent_scale: 0.25
+  heatmap_latent_offset: 0.0
+  heatmap_latent_stats_path: data/outputs/cosmos_heatmap_latent_stats/hot3d_open_ci16x16_random4096_seed42.json
+  heatmap_scheduler_clip_sample: true
+  use_block_attention_mask: true
+  use_frame_embedding: false
+  image_tokens_per_frame: 256
+  max_obs_frames: ${task.n_obs_steps}
+
+ema:
+  _target_: diffusion_policy.model.diffusion.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
+robot_dataloader:
+  batch_size: 48
+  num_workers: 8
+  shuffle: true
+  pin_memory: true
+  persistent_workers: true
+
+open_dataloader:
+  batch_size: 16
+  num_workers: 8
+  shuffle: true
+  pin_memory: true
+  persistent_workers: true
+
+val_robot_dataloader:
+  batch_size: 48
+  num_workers: 8
+  shuffle: false
+  pin_memory: true
+  persistent_workers: true
+
+val_open_dataloader:
+  batch_size: 16
+  num_workers: 8
+  shuffle: false
+  pin_memory: true
+  persistent_workers: true
+
+optimizer:
+  lr: 3.0e-4
+  weight_decay: 1.0e-6
+  obs_encoder_lr: 3.0e-5
+  obs_encoder_weight_decay: 1.0e-6
+  betas: [0.95, 0.999]
+
+training:
+  device: "cuda:0"
+  seed: 42
+  debug: false
+  require_amp: true
+  resume: false
+  resume_epoch: null
+  lr_scheduler: cosine
+  lr_warmup_steps: 2000
+  num_epochs: 200
+  gradient_accumulate_every: 1
+  use_ema: true
+  freeze_encoder: false
+  checkpoint_every: 1
+  val_every: 1
+  max_val_steps: null
+  val_mixing_seed: 100003
+  sample_every: 1
+  save_val_heatmap_preview: true
+  val_heatmap_preview_max_samples: 4
+  val_heatmap_preview_sample_seed: 42
+  gdr_every: 100
+  max_train_steps: null
+  tqdm_interval_sec: 1.0
+
+logging:
+  project: gaze_wam
+  resume: false
+  mode: online
+  name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+  tags: ["${name}", "${task_name}", "${exp_name}"]
+  id: null
+  group: null
+
+checkpoint:
+  topk:
+    monitor_key: val_loss
+    mode: min
+    k: 20
+    format_str: 'epoch={epoch:04d}-val_loss={val_loss:.3f}.ckpt'
+  save_last_ckpt: true
+  save_last_snapshot: false
+
+multi_run:
+  run_dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+  wandb_name_base: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+
+hydra:
+  job:
+    override_dirname: ${name}
+  run:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+  sweep:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+    subdir: ${hydra.job.num}

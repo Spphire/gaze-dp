@@ -1,0 +1,18 @@
+defaults:
+  - train_gaze_wam_open_only_workspace
+  - _self_
+
+name: train_gaze_wam_open_only_cosmos
+exp_name: "open_only_frozen_cosmos_heatmap_codec_fullres"
+
+policy:
+  heatmap_spatial_decoder: cosmos_tokenizer
+  heatmap_cosmos_encoder_path: data/checkpoints/cosmos_tokenizer/Cosmos-Tokenizer-CI16x16/encoder.jit
+  heatmap_cosmos_decoder_path: data/checkpoints/cosmos_tokenizer/Cosmos-Tokenizer-CI16x16/decoder.jit
+  heatmap_cosmos_input_range: minus_one_one
+  heatmap_cosmos_output_range: minus_one_one
+  heatmap_cosmos_input_normalization: max
+  heatmap_latent_scale: 0.25
+  heatmap_latent_offset: 0.0
+  heatmap_latent_stats_path: data/outputs/cosmos_heatmap_latent_stats/hot3d_open_ci16x16_random4096_seed42.json
+  heatmap_scheduler_clip_sample: true

@@ -1,0 +1,20 @@
+defaults:
+  - train_gaze_wam_open_only_cosmos_delta_noise_workspace
+  - _self_
+
+name: train_gaze_wam_open_only_cosmos_temporal_delta_noise
+exp_name: "open_only_frozen_cosmos_temporal_window_delta_noise_mse"
+
+task:
+  temporal_heatmap_mode: bidirectional
+  temporal_heatmap_window_radius: 30
+  temporal_heatmap_beta: 10.0
+  temporal_heatmap_sigma_px: 6.0
+  temporal_heatmap_current_weight: 2.0
+
+policy:
+  heatmap_objective: diffusion
+  heatmap_loss_weight: 1.0
+  heatmap_token_kl_loss_weight: 0.0
+  heatmap_xy_loss_weight: 0.0
+  heatmap_js_loss_weight: 0.0

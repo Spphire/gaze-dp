@@ -1,0 +1,11 @@
+defaults:
+  - train_gaze_wam_open_only_cosmos_temporal_mixed_loss_workspace
+  - _self_
+
+name: train_gaze_wam_open_only_cosmos_temporal_mixed_nll
+exp_name: "open_only_frozen_cosmos_temporal_window_mixed_nll"
+
+policy:
+  heatmap_xy_loss_weight: 0.0
+  heatmap_point_nll_loss_weight: 0.001
+  heatmap_js_loss_weight: 0.10

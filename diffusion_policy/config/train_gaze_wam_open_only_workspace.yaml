@@ -1,0 +1,50 @@
+defaults:
+  - train_gaze_wam_workspace
+  - _self_
+
+name: train_gaze_wam_open_only
+exp_name: "open_only_frozen_cosmos_heatmap_codec_fullres"
+
+task:
+  open_dataset_path: data/hot3d_open.zarr
+
+policy:
+  action_loss_weight: 0.0
+  heatmap_loss_weight: 1.0
+  heatmap_token_kl_loss_weight: 0.0
+  heatmap_objective: dsnt_js
+  heatmap_xy_loss_weight: 1.0
+  heatmap_point_nll_loss_weight: 0.0
+  heatmap_js_loss_weight: 1.0
+  heatmap_dsnt_temperature: 0.1
+  heatmap_distribution_mode: intensity_softplus
+  heatmap_spatial_decoder: cosmos_tokenizer
+  heatmap_cosmos_encoder_path: data/checkpoints/cosmos_tokenizer/Cosmos-Tokenizer-CI16x16/encoder.jit
+  heatmap_cosmos_decoder_path: data/checkpoints/cosmos_tokenizer/Cosmos-Tokenizer-CI16x16/decoder.jit
+  heatmap_cosmos_input_range: minus_one_one
+  heatmap_cosmos_output_range: minus_one_one
+  heatmap_cosmos_input_normalization: max
+  heatmap_latent_scale: 0.25
+  heatmap_latent_offset: 0.0
+  heatmap_latent_stats_path: data/outputs/cosmos_heatmap_latent_stats/hot3d_open_ci16x16_random4096_seed42.json
+  heatmap_scheduler_clip_sample: true
+
+robot_dataloader:
+  batch_size: 0
+
+open_dataloader:
+  batch_size: 16
+  num_workers: 2
+
+val_robot_dataloader:
+  batch_size: 0
+
+val_open_dataloader:
+  batch_size: 16
+  num_workers: 1
+
+training:
+  gdr_every: 0
+  gradient_accumulate_every: 4
+  freeze_encoder: true
+  use_ema: false

@@ -1,0 +1,14 @@
+defaults:
+  - train_gaze_wam_open_only_cosmos_workspace
+  - _self_
+
+name: train_gaze_wam_open_only_cosmos_delta_noise
+exp_name: "open_only_frozen_cosmos_delta_noise_mse"
+
+policy:
+  heatmap_objective: diffusion
+  heatmap_loss_weight: 1.0
+  heatmap_token_kl_loss_weight: 0.0
+  heatmap_xy_loss_weight: 0.0
+  heatmap_point_nll_loss_weight: 0.0
+  heatmap_js_loss_weight: 0.0
