@@ -13,7 +13,7 @@ from diffusion_policy.common.pytorch_util import dict_apply
 from diffusion_policy.policy.gaze_wam_policy import GazeWamPolicy
 from diffusion_policy.real_world.gaze_wam_action_base import action_base_abs_to_10d
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
-from umi.common.pose_util import mat_to_pose10d, pose_to_mat
+from diffusion_policy.common.pose_util import mat_to_pose10d, pose_to_mat
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 

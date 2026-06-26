@@ -20,7 +20,7 @@ def _ensure_debug_data_runtime():
             gaussian_heatmaps_from_points as _gaussian_heatmaps_from_points,
         )
         from scipy.spatial.transform import Rotation as _Rotation
-        from umi.common.pose_util import mat_to_rot6d as _mat_to_rot6d
+        from diffusion_policy.common.pose_util import mat_to_rot6d as _mat_to_rot6d
 
         gaussian_heatmaps_from_points = _gaussian_heatmaps_from_points
         Rotation = _Rotation

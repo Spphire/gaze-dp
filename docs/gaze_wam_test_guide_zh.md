@@ -40,7 +40,7 @@
 如果只想快速确认核心工具链，再加上这些：
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests\test_pose_util.py tests\test_uvc_camera.py tests\test_multi_uvc_camera.py -q
+.\.venv\Scripts\python.exe -m pytest tests\test_pose_util.py -q
 ```
 
 ## 3. 预检

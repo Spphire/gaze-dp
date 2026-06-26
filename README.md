@@ -1,77 +1,84 @@
-# Data Scaling Laws in Imitation Learning for Robotic Manipulation
+# Gaze-WAM
 
-[[Project Page]](https://data-scaling-laws.github.io/)
-[[Paper]](https://data-scaling-laws.github.io/paper.pdf)
-[[Models]](https://huggingface.co/Fanqi-Lin/Task-Models/tree/main)
-[[Processed Dataset]](https://huggingface.co/datasets/Fanqi-Lin/Processed-Task-Dataset/tree/main)
-[[Raw GoPro Videos]](https://huggingface.co/datasets/Fanqi-Lin/GoPro-Raw-Videos)
+Gaze-conditioned manipulation policy that co-trains on **action-free egocentric
+gaze data** (open datasets such as HOT3D) and **recorded robot demonstrations**.
+The two sources are merged into one mixed batch:
 
-<p>
-    <img src="./assets/wild-data.gif" alt="wild-data" width="45%" />
-    <img src="./assets/wild-eval.gif" alt="wild-eval" width="45%" />
-</p>
+- **open rows** (no robot action) supervise a **gaze / heatmap loss** — where the
+  agent should look;
+- **robot rows** supervise an **action loss** — what the arm should do.
 
-[Fanqi Lin](https://fanqi-lin.github.io/)<sup>1,2,3\*</sup>,
-[Yingdong Hu](https://yingdong-hu.github.io/)<sup>1,2,3\*</sup>,
-Pingyue Sheng<sup>1</sup>,
-[Chuan Wen](https://alvinwen428.github.io/)<sup>1,2,3</sup>,
-[Jiacheng You](https://scholar.google.com/citations?user=FiP-TVUAAAAJ)<sup>1</sup>,
-[Yang Gao](https://yang-gao.weebly.com/)<sup>1,2,3</sup>,
+The backbone is a FastWAM-style **shared-KV dual-stream transformer**: a world
+(image + gaze) tower is prefilled once into a per-layer K/V cache, which is then
+consumed by two separate target decoders — an **action** decoder and a
+**gaze-heatmap** decoder. Per-sample masks route each loss to the rows that
+actually carry that supervision, so gaze that is fed as a condition is never also
+used as a target (no label leakage).
 
-<sup>1</sup>Tsinghua University,
-<sup>2</sup>Shanghai Qi Zhi Institute,
-<sup>3</sup>Shanghai Artificial Intelligence Laboratory
+> Status: the **open-only** path (HOT3D → zarr → train/eval) is runnable today.
+> Robot data collection is not started yet, so the robot/action side is wired but
+> untrained.
 
-<sup>\*</sup> indicates equal contributions
+## Layout
 
-## 🛠️ Installation
-See the [UMI repository](https://github.com/real-stanford/universal_manipulation_interface) for installation. 
-
-## 📷 Data
-We release data for all four of our tasks: *pour water, arrange mouse, fold towel*, and *unplug charger*. You can view or download all raw GoPro videos from this [link](https://huggingface.co/datasets/Fanqi-Lin/GoPro-Raw-Videos), and generate the dataset for training by running:
-
-```shell
-bash run_slam.sh && bash run_generate_dataset.sh
+```
+diffusion_policy/
+  model/gaze_wam/        # dual-stream transformer, gaze encoder, heatmap codec, losses
+  policy/gaze_wam_policy.py
+  dataset/               # gaze_wam_dataset.py, gaze_wam_mixing.py (mixed-batch builder)
+  workspace/train_gaze_wam_workspace.py
+  config/                # train_gaze_wam_*_workspace.yaml, task/gaze_wam.yaml
+  common/                # gaze/action utils, pose_util, training-config validation
+  real_world/            # gaze_wam_* deployment/inference bindings
+scripts/                 # data prep, eval, ablation comparison, preflight (all gaze-wam)
+train_scripts/           # 8-GPU / preview launch scripts
+docs/                    # gaze_wam_test_guide_zh.md, experiment reports
 ```
 
-Alternatively, we provide processed dataset [here](https://huggingface.co/datasets/Fanqi-Lin/Processed-Task-Dataset/tree/main), ready for direct use in training.
-
-You can visualize the dataset with a simple script:
-```shell
-python visualize_dataset.py
-```
-
-## 🦾 Real-World Evaluation
-For the hardware setup, please refer to the [UMI repo](https://github.com/real-stanford/universal_manipulation_interface) (note: we remove the mirror from the gripper, see [link](https://drive.google.com/drive/folders/1DLGfRWYvODOnHwn9Ye-xWlYhXk0WwBGG?usp=sharing)).
-
-For each task, we release a policy trained on data collected from 32 unique environment-object pairs, with 50 demonstrations per environment. These polices generalize well to any new environment and new object. You can download them from [link](https://huggingface.co/Fanqi-Lin/Task-Models/tree/main) and run real-world evaluation using:
+## Install
 
 ```shell
-bash eval.sh
+conda env create -f conda_environment.yaml
 ```
 
-The ```temporal_agg``` parameter in eval.sh refers to temporal ensemble strategy mentioned in our paper, enabling smoother robot actions.
+## Data (open side)
 
-Additionally, you can use the ```-j``` parameter to reset the robot arm to a fixed initial position (make sure that the initial joint configuration specified in ```example/eval_robots_config.yaml``` is safe for your robot !!!).
+HOT3D is converted to the open-gaze zarr contract with the scripts under
+`scripts/`, e.g. `preprocess_hot3d_aria.py`,
+`convert_hot3d_processed_to_open_zarr.py`, `prepare_open_gaze_wam_zarr.py`.
+Inspect / validate a built zarr with `scripts/inspect_gaze_wam_zarr.py` and
+`scripts/validate_gaze_wam_zarr.py`.
 
-## 📊 Reproducing Data Scaling Laws
-After downloading the [processed dataset](https://huggingface.co/datasets/Fanqi-Lin/Processed-Task-Dataset/tree/main), you can train a policy by running:
+## Train
+
+Single GPU (Hydra workspace via `train.py`):
 
 ```shell
-cd train_scripts && bash <task_name>.sh
+python train.py --config-name train_gaze_wam_open_only_workspace
 ```
 
-For multi-GPU training, configure your setup with ```accelerate config```, then replace ```python``` with ```accelerate launch``` in the ```<task_name>.sh``` script. Additionally, you can speed up training without sacrificing policy performance by adding the ```--mixed_precision 'bf16'``` argument.
+Multi-GPU (8×): configure `accelerate` (see `accelerate/8gpu-amp.yaml`) and use the
+launch scripts in `train_scripts/`, e.g. `train_gaze_wam_open_only_8gpu_amp.sh`.
 
-Note that for the pour_water and unplug_charger tasks, we incorporate an additional step of historical observation for policy training and inference.
+Gaze-loss ablation variants live in
+`diffusion_policy/config/train_gaze_wam_open_only_cosmos_temporal_*_workspace.yaml`
+(`mixed_loss`, `mixed_nll`, delta-noise, …).
 
-The current parameters in the ```<task_name.sh>``` scripts correspond to our released [models](https://huggingface.co/Fanqi-Lin/Task-Models/tree/main), but you can customize training:
-+ Use ```policy.obs_encoder.model_name``` to specify the type of vision encoder for the diffusion policy. Other options include ```vit_base_patch14_dinov2.lvd142m``` (DINOv2 ViT-Base) and ```vit_large_patch14_clip_224.openai``` (CLIP ViT-Large).
-+ To adjust the number of training environment-object pairs (up to a maximum of 32), modify ```task.dataset.dataset_idx```. You can change the proportion of demonstrations used by adjusting ```task.dataset.use_ratio``` within the range (0, 1]. Training policies on data from different environment-object pairs, using 100% of the demonstrations, generates scaling curves similar to the following:
+## Evaluate / compare
 
-<img width="90%" src="assets/scaling-law-curve.png">
+```shell
+python scripts/eval_gaze_wam_metrics.py        # gaze-prediction metrics on a zarr
+python scripts/compare_gaze_wam_ablation_metrics.py
+```
 
-The curve (third column) shows that the policy’s ability to generalize to new environments and objects scales approximately as a power law with the number of training environment-object pairs.
+## Tests & preflight
 
-## 🙏 Acknowledgement
-We thank the authors of [UMI](https://github.com/real-stanford/universal_manipulation_interface) for sharing their codebase.
+See [docs/gaze_wam_test_guide_zh.md](docs/gaze_wam_test_guide_zh.md) for the
+shortest path to confirm the code compiles, key unit tests pass, and
+`scripts/preflight_gaze_wam.py` runs.
+
+## Acknowledgement
+
+Forked from the Data Scaling Laws / UMI diffusion-policy codebase; the
+simulation, UMI teleop, and SLAM data-collection tooling have been removed to
+focus the repo on the Gaze-WAM training core.

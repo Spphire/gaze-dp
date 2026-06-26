@@ -1,6 +1,6 @@
 import numpy as np
 
-from umi.common.pose_util import mat_to_pose10d, pose10d_to_mat
+from diffusion_policy.common.pose_util import mat_to_pose10d, pose10d_to_mat
 
 
 def _split_action_dims(action_dim: int):

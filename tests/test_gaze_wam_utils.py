@@ -218,7 +218,7 @@ import diffusion_policy.workspace.train_gaze_wam_workspace as train_gaze_wam_wor
 from diffusion_policy.model.vision.transformer_obs_encoder import (  # noqa: E402
     TransformerObsEncoder,
 )
-from umi.common.pose_util import mat_to_rot6d  # noqa: E402
+from diffusion_policy.common.pose_util import mat_to_rot6d  # noqa: E402
 
 
 def _random_pose10(batch_shape):
