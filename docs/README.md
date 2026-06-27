@@ -13,6 +13,9 @@ training commands. This index points to the deeper docs.
 
 Day-to-day usage references (Chinese).
 
+- [server_runbook_zh.md](guides/server_runbook_zh.md) — 服务器实战手册：
+  `scripts/ops/*.sh` 工具的使用、tmux 长任务套路、preflight 排错。
+  **推荐先读这一篇。**
 - [local_usage_zh.md](guides/local_usage_zh.md) — local development workflow
 - [test_guide_zh.md](guides/test_guide_zh.md) — quickest path to confirm code
   compiles, key unit tests pass, and `preflight_gaze_wam.py` runs
