@@ -19,38 +19,37 @@ server unattended, and what to do tomorrow.
 
 ## What is running unattended on the server right now
 
-A cascade script (`/tmp/cascade.sh`, pid 2415 on H200-4042) is doing:
+**Update at 19:20:** val (24 G) and Cosmos latent stats are both already
+done. Only `train` conversion is still running.
 
-1. Wait for val conversion (started 18:57, ~10–15 min total) to finish.
-2. Launch train conversion (`scripts/convert_hot3d_train.sh`, now 256×256;
-   expected ~3 h CPU-bound video decode).
-3. In parallel with train, generate Cosmos latent stats from val:
-   `data/outputs/cosmos_heatmap_latent_stats/hot3d_open_ci16x16_random4096_seed42.json`
-   (uses GPU 0, ~5 min).
-4. Wait for train to finish, print final state.
+| step | status | path / pid |
+|---|---|---|
+| val zarr 256² | ✅ done (24 G) | `data/hot3d_open_val.zarr` |
+| Cosmos latent stats | ✅ done (4.3 K JSON, scale=0.25 confirmed) | `data/outputs/cosmos_heatmap_latent_stats/hot3d_open_ci16x16_random4096_seed42.json` |
+| train zarr 256² | ⏳ running | server pid 2624618, log `/tmp/convert_train_256.log` |
 
-All output goes to `/tmp/cascade.log`, plus per-step logs:
-- `/tmp/convert_val_256.log`
-- `/tmp/convert_train_256.log`
-- `/tmp/latent_stats.log`
-
-This runs untended in `nohup`. **Local watcher was deliberately stopped**, so
-the only way to confirm completion is to ssh in tomorrow morning and check.
+The cascade orchestration script attempted earlier was discovered to have
+been spawned locally rather than on the server, so it never ran end-to-end.
+The three jobs above were instead launched directly via server-side `nohup`
+and confirmed with `ps`. Train conversion alone is now the only remaining
+unattended job; expected duration ≈ 3 h CPU-bound video decode.
 
 ## Tomorrow's first commands
 
 ```bash
 ssh H200-4042 bash -c '
-  tail -5 /tmp/cascade.log
+  ps -p 2624618 -o stat,etime --no-headers 2>/dev/null || echo "train finished"
+  tail -3 /tmp/convert_train_256.log
   du -sh /mnt/workspace/shenyibo/gaze-wam/data/hot3d_open_*.zarr 2>/dev/null
-  ls -lh /mnt/workspace/shenyibo/gaze-wam/data/outputs/cosmos_heatmap_latent_stats/ 2>/dev/null
+  ls -lh /mnt/workspace/shenyibo/gaze-wam/data/outputs/cosmos_heatmap_latent_stats/
 '
 ```
 
 Expected steady state:
-- `hot3d_open_val.zarr` ≈ 23–25 G (was 19 G at 224²)
-- `hot3d_open_train.zarr` ≈ 90–100 G (was 77 G at 224²)
-- `hot3d_open_ci16x16_random4096_seed42.json` exists, non-empty
+- `hot3d_open_val.zarr` ≈ 24 G (was 19 G at 224²; **already finished**)
+- `hot3d_open_train.zarr` ≈ 90–100 G (still growing)
+- `hot3d_open_ci16x16_random4096_seed42.json` 4.3 K, scale=0.25
+  (**already finished**)
 
 Then run the full preflight to make sure all three issues from today are now
 resolved:
