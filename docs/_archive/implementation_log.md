@@ -1,5 +1,12 @@
 # Gaze-WAM Implementation Log
 
+> **ARCHIVED 2026-06-27.** 22 k-line chronological dev log. Predates the
+> UMI/SLAM/real-robot cleanup and references modules and scripts that have
+> been removed (e.g. `scripts_real/`, `scripts_slam_pipeline/`,
+> `diffusion_policy.codecs`). Kept for traceability of past decisions; not the
+> current source of truth. For the current state see the top-level
+> [README.md](../../README.md) and [docs/README.md](../README.md).
+
 ## 2026-06-17
 
 ### Temporal Mix-LNLL Latest/Epoch 48 Fallback Comparison

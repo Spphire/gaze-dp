@@ -1,5 +1,13 @@
 # Gaze-WAM Design And Implementation Plan
 
+> **Note (2026-06-27):** parts of this document — particularly UMI alignment
+> notes (pose conventions, action utilities, SLAM dataset conversion) — refer
+> to the original fork's tooling that has since been removed. The core design
+> (mixed-batch routing, dual-stream KV cache, gaze/heatmap loss split) is
+> still current. Treat UMI/SLAM mentions as historical rationale, not as a
+> blueprint for current code. See the top-level [README.md](../../README.md)
+> for the current architecture summary.
+
 ## 0. Current Scope
 
 This document is the implementation contract for `gaze-wam`, built on top of

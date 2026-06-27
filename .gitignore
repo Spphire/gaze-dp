@@ -8,6 +8,13 @@ wandb
 **/.DS_Store
 *.lprof
 
+# Gaze-WAM local-only artifacts
+.codex_tmp/
+_archive_datascalinglaws_original_*/
+*.pptx
+gaze_wam_architecture_editable.svg
+gaze_wam_architecture_editable_render.png
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

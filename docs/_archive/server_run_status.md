@@ -1,5 +1,11 @@
 # Gaze-WAM Server Run Status
 
+> **ARCHIVED 2026-06-27.** This log predates the UMI/SLAM/real-robot cleanup
+> and references file paths, scripts, and configs that no longer exist on the
+> `gaze-wam-cleanup` branch. Kept for historical context only; do **not** use
+> the commands or paths in this file as current operating procedure. For the
+> current setup, see the top-level [README.md](../../README.md).
+
 Last checked: 2026-06-17 17:29 Asia/Shanghai
 
 ## Active Server Run
