@@ -3,6 +3,19 @@
 End-of-day handoff. Covers everything done today, what is still running on the
 server unattended, and what to do tomorrow.
 
+> **UPDATE 2026-06-28 01:25 — DATA PREP COMPLETE, ALL GREEN.**
+> The first train zarr (224²) was wrong size; the second (256²) had a
+> race-corrupted output (missing .zarray + 192 missing chunks). The third
+> attempt, run through the new hardened `scripts/ops/prepare_hot3d_zarr.sh`
+> path, finished clean:
+> - `hot3d_open_train.zarr` 99 G, 564006 frames, **integrity verifier: ALL
+>   FIELDS CONSISTENT** (camera0_rgb 35251/35251 chunks).
+> - **preflight errors: [] warnings: []** on the mixed_nll config.
+> - `hot3d_open_val.zarr` 24 G and Cosmos latent stats already done earlier.
+>
+> Data is ready to train. Next session can go straight to the training
+> commands in `docs/guides/server_runbook_zh.md` §5.
+
 ## TL;DR
 
 - Repo is cleaned and pushed: only `gaze-wam-cleanup` on `gaze-dp` (default
