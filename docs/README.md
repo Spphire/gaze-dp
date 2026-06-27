@@ -3,6 +3,12 @@
 See the top-level [README.md](../README.md) for setup, data pipeline, and
 training commands. This index points to the deeper docs.
 
+## Daily status
+
+- [today_status_20260627.md](today_status_20260627.md) — end-of-day handoff
+  for 2026-06-27, including unattended jobs still running on H200-4042 and
+  the first commands to run on the next session.
+
 ## guides/ — how-to
 
 Day-to-day usage references (Chinese).
