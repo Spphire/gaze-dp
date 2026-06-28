@@ -69,7 +69,7 @@ for p in "${pids[@]}"; do wait "$p" || echo "eval pid $p returned nonzero"; done
 # 3. assemble comparison table
 echo "--- assembling RESULTS.md ---"
 "$PYTHON" - "$SWEEP_DIR" <<'PYEOF'
-import json, glob, os, sys
+import json, glob, os, sys, re
 sweep = sys.argv[1]
 rows = []
 for f in sorted(glob.glob(os.path.join(sweep, "*", "multimodal_eval.json"))):
@@ -78,7 +78,16 @@ for f in sorted(glob.glob(os.path.join(sweep, "*", "multimodal_eval.json"))):
     except Exception as e:
         print(f"skip {f}: {e}"); continue
     name = os.path.basename(os.path.dirname(f))
-    rows.append((name, r))
+    # pull role + purpose from the run's EXPERIMENT.md
+    role = purpose = ""
+    card = os.path.join(os.path.dirname(f), "EXPERIMENT.md")
+    if os.path.exists(card):
+        txt = open(card, encoding="utf-8").read()
+        mr = re.search(r"\*\*role\*\*:\s*(.+)", txt)
+        mp = re.search(r"\*\*purpose\*\*:\s*(.+)", txt)
+        role = mr.group(1).strip() if mr else ""
+        purpose = mp.group(1).strip() if mp else ""
+    rows.append((name, role, purpose, r))
 
 def g(r, k):
     return r.get(k, float("nan"))
@@ -86,18 +95,22 @@ def g(r, k):
 lines = []
 lines.append("# NLL sweep — multimodal heatmap eval\n")
 lines.append(f"sweep: `{sweep}`  |  val: hot3d_open_val.zarr\n")
-lines.append("| run | argmax_l2↓ | point_nll↓ | peak_count | %multi-peak | entropy |")
-lines.append("|---|---|---|---|---|---|")
-for name, r in rows:
-    lines.append("| {} | {:.4f} | {:.3f} | {:.2f} | {:.2f} | {:.3f} |".format(
-        name, g(r,"argmax_l2_mean"), g(r,"point_nll_mean"),
+lines.append("| run | role | argmax_l2↓ | point_nll↓ | peak_count | %multi | entropy |")
+lines.append("|---|---|---|---|---|---|---|")
+for name, role, purpose, r in rows:
+    lines.append("| {} | {} | {:.4f} | {:.3f} | {:.2f} | {:.2f} | {:.3f} |".format(
+        name, role, g(r,"argmax_l2_mean"), g(r,"point_nll_mean"),
         g(r,"peak_count_mean"), g(r,"peak_count_frac_multi"), g(r,"entropy_mean")))
+lines.append("")
+lines.append("## 每个 run 的目的")
+for name, role, purpose, r in rows:
+    lines.append(f"- **{name}** ({role}): {purpose}")
 lines.append("")
 lines.append("Read: lower argmax_l2 + lower point_nll = better localization/coverage; "
              "peak_count>1 and entropy not collapsing = multimodality preserved. "
              "The sweet spot maximizes localization WITHOUT collapsing peaks.")
 out = os.path.join(sweep, "RESULTS.md")
-open(out, "w").write("\n".join(lines))
+open(out, "w", encoding="utf-8").write("\n".join(lines))
 print("\n".join(lines))
 print(f"\nwrote {out}")
 PYEOF
