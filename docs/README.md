@@ -31,6 +31,9 @@ Day-to-day usage references (Chinese).
 - [single_point_to_multimodal_research.md](design/single_point_to_multimodal_research.md)
   — research notes on going from single-point gaze supervision to a full
   multimodal heatmap target
+- [multimodal_heatmap_nll_weight.md](design/multimodal_heatmap_nll_weight.md)
+  — multimodal gaze design + the point-NLL weight sweep that operationalizes
+  it (why DSNT-xy must stay 0, why point-NLL is the multimodal-safe anchor)
 
 ## reviews/ — code / architecture reviews
 

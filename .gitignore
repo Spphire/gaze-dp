@@ -182,3 +182,5 @@ ckpt
 pretrained_model
 test_script
 test
+# local heatmap render previews
+_preview_heatmap/
