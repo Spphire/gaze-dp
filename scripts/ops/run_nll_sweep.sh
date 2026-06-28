@@ -30,6 +30,8 @@ REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"
 
 STEPS=${STEPS:-2000}
+CKPT_EVERY=${CKPT_EVERY:-1000}
+VAL_EVERY=${VAL_EVERY:-500}
 ZARR=${ZARR:-data/hot3d_open_train.zarr}
 CONFIG=${CONFIG:-train_gaze_wam_open_only_cosmos_temporal_mixed_nll_workspace}
 PYTHON=${PYTHON:-.venv/bin/python}
@@ -53,6 +55,18 @@ ALL_GRID=(
 
 # Optional subset, e.g. GRID_ROWS=0-5 or GRID_ROWS=0,3,5
 SELECT=${GRID_ROWS:-all}
+
+# Optional custom grid file (one "gpu nll js | role | purpose" row per line),
+# overrides the built-in quick-sweep grid. Lines starting with # are ignored.
+if [[ -n "${GRID_FILE:-}" ]]; then
+  if [[ ! -f "$GRID_FILE" ]]; then echo "GRID_FILE not found: $GRID_FILE" >&2; exit 1; fi
+  ALL_GRID=()
+  while IFS= read -r line; do
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    ALL_GRID+=("$line")
+  done < "$GRID_FILE"
+  echo "using custom grid: $GRID_FILE (${#ALL_GRID[@]} rows)"
+fi
 
 TS=$(date +%Y%m%d_%H%M)
 SWEEP_DIR="data/outputs/sweep_nll_$TS"
@@ -113,7 +127,7 @@ task.open_dataset_path=$ZARR task.robot_dataset_path=null \
 policy.heatmap_point_nll_loss_weight=$nll policy.heatmap_js_loss_weight=$js \
 training.gradient_accumulate_every=1 training.max_train_steps=$STEPS \
 training.num_epochs=1 training.lr_warmup_steps=100 \
-training.checkpoint_every=1000 training.val_every=500 training.max_val_steps=8 \
+training.checkpoint_every=$CKPT_EVERY training.val_every=$VAL_EVERY training.max_val_steps=8 \
 training.sample_every=999999 training.save_val_heatmap_preview=false \
 name=sweep_${name} hydra.run.dir=$rundir"
 

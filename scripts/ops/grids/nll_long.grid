@@ -1,0 +1,12 @@
+# Narrowed long-run grid: {nll 0, 0.01, 0.05} x {js 0.1, 0.3}, 6 configs on GPU 0-5.
+# Quick sweep (sweep_nll_20260628_1241) ruled out nll>=0.2 (destabilizes the
+# diffusion backbone) and showed nll<=0.05 differences sit inside noise at 2000
+# steps. This run is longer (set STEPS) so heatmaps sharpen past the gaze prior
+# and the coverage/multimodality tradeoff becomes visible.
+# Row: gpu nll js | role | purpose
+0 0.0  0.1 | long:nll0-js0.1 | 长跑对照：纯 diffusion+JS，无 point-NLL
+1 0.01 0.1 | long:nll0.01-js0.1 | 低 NLL，标准 JS
+2 0.05 0.1 | long:nll0.05-js0.1 | 候选 NLL，标准 JS
+3 0.0  0.3 | long:nll0-js0.3 | 无 NLL，强 JS（看 JS 单独能 sharpen 到什么程度）
+4 0.01 0.3 | long:nll0.01-js0.3 | 低 NLL，强 JS
+5 0.05 0.3 | long:nll0.05-js0.3 | 候选 NLL，强 JS

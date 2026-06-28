@@ -44,7 +44,13 @@ def to_hw(img):
     return t  # [B,H,W]
 
 
-def count_peaks(p, rel=0.5, min_dist=8):
+def count_peaks(p, rel=0.6, min_dist=16):
+    """Count well-separated dominant modes (local maxima >= rel*max).
+
+    Tightened defaults (rel 0.6, min_dist 16) so a diffuse/grainy heatmap does
+    not register dozens of noise peaks; entropy is the smoother multimodality
+    signal, peak_count is the discrete companion.
+    """
     mx = float(p.max())
     if mx <= 0:
         return 0
@@ -76,9 +82,8 @@ def main():
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
-    policy, _ws = load_policy_for_eval(checkpoint=args.checkpoint, device=args.device, use_ema=True)
+    policy, cfg = load_policy_for_eval(checkpoint=args.checkpoint, device=args.device, use_ema=True)
     policy.eval()
-    cfg = _ws.cfg if hasattr(_ws, "cfg") else None
 
     # Build val dataset from the checkpoint cfg's open_dataset spec, pointed at val zarr.
     import hydra
