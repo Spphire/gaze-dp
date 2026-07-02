@@ -1,0 +1,8 @@
+# Non-portable editable installs observed in H200 .venv pip freeze.
+# Keep out of requirements.txt because pip install --dry-run rejects these paths as editable requirements in this repo context.
+# Review whether these are actually needed for Gaze-WAM before vendorizing or replacing with VCS URLs.
+
+# Editable install with no version control (mdm==1.0.0)
+# Editable install with no version control (moge==2.0.0)
+-e /mnt/workspace/lihongqiong/project/vla/nmx_vla/nmx_vla/model/modules/depth_models/MoGe
+-e /mnt/workspace/lihongqiong/project/vla/nmx_vla/nmx_vla/model/modules/depth_models/lingbot-depth
