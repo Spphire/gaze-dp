@@ -358,7 +358,9 @@ class TransformerObsEncoder(ModuleAttrMixin):
 def test():
     import hydra
     from omegaconf import OmegaConf
-    OmegaConf.register_new_resolver("eval", eval, replace=True)
+    from diffusion_policy.common.omegaconf_resolvers import register_safe_omegaconf_resolvers
+
+    register_safe_omegaconf_resolvers()
 
     with hydra.initialize('../diffusion_policy/config'):
         cfg = hydra.compose('train_diffusion_transformer_umi_workspace')

@@ -9,6 +9,8 @@ import dill
 import torch
 import threading
 
+from diffusion_policy.common.checkpoint_security import require_trusted_pickle_artifact
+
 
 class BaseWorkspace:
     include_keys = tuple()
@@ -89,11 +91,17 @@ class BaseWorkspace:
     def load_checkpoint(self, path=None, tag='latest',
             exclude_keys=None, 
             include_keys=None, 
+            trust_checkpoint=False,
             **kwargs):
         if path is None:
             path = self.get_checkpoint_path(tag=tag)
         else:
             path = pathlib.Path(path)
+        path = require_trusted_pickle_artifact(
+            path,
+            trusted=trust_checkpoint,
+            artifact_name="workspace checkpoint",
+        )
         payload = torch.load(path.open('rb'), pickle_module=dill, **kwargs)
         self.load_payload(payload, 
             exclude_keys=exclude_keys, 
@@ -104,8 +112,14 @@ class BaseWorkspace:
     def create_from_checkpoint(cls, path, 
             exclude_keys=None, 
             include_keys=None,
+            trust_checkpoint=False,
             **kwargs):
-        payload = torch.load(open(path, 'rb'), pickle_module=dill)
+        path = require_trusted_pickle_artifact(
+            path,
+            trusted=trust_checkpoint,
+            artifact_name="workspace checkpoint",
+        )
+        payload = torch.load(path.open('rb'), pickle_module=dill)
         instance = cls(payload['cfg'])
         instance.load_payload(
             payload=payload, 
@@ -127,8 +141,13 @@ class BaseWorkspace:
         return str(path.absolute())
     
     @classmethod
-    def create_from_snapshot(cls, path):
-        return torch.load(open(path, 'rb'), pickle_module=dill)
+    def create_from_snapshot(cls, path, trust_checkpoint=False):
+        path = require_trusted_pickle_artifact(
+            path,
+            trusted=trust_checkpoint,
+            artifact_name="workspace snapshot",
+        )
+        return torch.load(path.open('rb'), pickle_module=dill)
 
 
 def _copy_to_cpu(x):

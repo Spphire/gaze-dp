@@ -22,8 +22,11 @@ if TYPE_CHECKING:
 def _import_hydra_and_omegaconf():
     import hydra
     from omegaconf import OmegaConf
+    from diffusion_policy.common.omegaconf_resolvers import (
+        register_safe_omegaconf_resolvers,
+    )
 
-    OmegaConf.register_new_resolver("eval", eval, replace=True)
+    register_safe_omegaconf_resolvers()
     return hydra, OmegaConf
 
 
@@ -683,6 +686,7 @@ def run_gaze_wam_checkpoint_zarr_deployment_rehearsal(
     require_timestamps: bool = False,
     timestamp_max_delta: Optional[float] = None,
     timestamp_max_step: Optional[float] = None,
+    trust_checkpoint: bool = False,
     **kwargs,
 ) -> Dict[str, Any]:
     GazeWamInferenceAdapter = _import_inference_adapter()
@@ -708,6 +712,7 @@ def run_gaze_wam_checkpoint_zarr_deployment_rehearsal(
         num_inference_steps=num_inference_steps,
         camera_key=adapter_camera_key,
         cfg_scale=cfg_scale,
+        trust_checkpoint=trust_checkpoint,
     )
     payload = run_gaze_wam_zarr_deployment_rehearsal(
         adapter=adapter,

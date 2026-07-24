@@ -9,6 +9,7 @@ Usage:
     --ckpt nll0:<dir>/nll0.0_js0.1/checkpoints/latest.ckpt \
     --ckpt nll0.05:<dir>/nll0.05_js0.1/checkpoints/latest.ckpt \
     --ckpt nll1.0:<dir>/nll1.0_js0.1/checkpoints/latest.ckpt \
+    --trust-checkpoint \
     --n 5 --out-dir data/outputs/pred_heatmap_compare --device cuda:0
 """
 import argparse, os
@@ -16,8 +17,9 @@ import numpy as np
 import torch
 import cv2
 from omegaconf import OmegaConf
+from diffusion_policy.common.omegaconf_resolvers import register_safe_omegaconf_resolvers
 
-OmegaConf.register_new_resolver("eval", eval, replace=True)
+register_safe_omegaconf_resolvers()
 from diffusion_policy.scripts.eval_gaze_wam_metrics import load_policy_for_eval
 
 
@@ -44,6 +46,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--val-zarr", default="data/hot3d_open_val.zarr")
     ap.add_argument("--ckpt", action="append", required=True, help="label:path")
+    ap.add_argument(
+        "--trust-checkpoint",
+        action="store_true",
+        help="Acknowledge that all dill checkpoints are trusted and may execute code.",
+    )
     ap.add_argument("--n", type=int, default=5)
     ap.add_argument("--out-dir", default="data/outputs/pred_heatmap_compare")
     ap.add_argument("--device", default="cuda:0")
@@ -56,7 +63,12 @@ def main():
 
     # load first policy + cfg to build dataset
     import hydra
-    pol0, cfg = load_policy_for_eval(checkpoint=paths[0], device=args.device, use_ema=True)
+    pol0, cfg = load_policy_for_eval(
+        checkpoint=paths[0],
+        device=args.device,
+        use_ema=True,
+        trust_checkpoint=args.trust_checkpoint,
+    )
     pol0.eval()
     ds_cfg = OmegaConf.create(OmegaConf.to_container(cfg.task.open_dataset, resolve=True))
     ds_cfg.dataset_path = args.val_zarr
@@ -94,7 +106,12 @@ def main():
     # predict per checkpoint
     preds = {}
     for lab, pth in zip(labels, paths):
-        pol, _ = load_policy_for_eval(checkpoint=pth, device=args.device, use_ema=True)
+        pol, _ = load_policy_for_eval(
+            checkpoint=pth,
+            device=args.device,
+            use_ema=True,
+            trust_checkpoint=args.trust_checkpoint,
+        )
         pol.eval()
         with torch.no_grad():
             out = pol.predict_heatmap(obs_dict, decode=True)

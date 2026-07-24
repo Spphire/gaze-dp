@@ -243,6 +243,7 @@ def review_gaze_wam_training_readiness(
     python_bin: str = "py",
     preflight_device: str = "cpu",
     preflight_checkpoint: Optional[str] = None,
+    trust_preflight_checkpoint: bool = False,
     preflight_require_timestamps: bool = True,
     preflight_timestamp_max_delta: Optional[float] = None,
     preflight_timestamp_max_step: Optional[float] = None,
@@ -539,6 +540,7 @@ def review_gaze_wam_training_readiness(
             python_bin=python_bin,
             preflight_device=preflight_device,
             preflight_checkpoint=preflight_checkpoint,
+            trust_preflight_checkpoint=trust_preflight_checkpoint,
             skip_preflight=not run_launch_preflight,
             skip_zarr_validation=False,
             skip_loss_smoke=False,
@@ -623,6 +625,11 @@ def parse_args(argv: Optional[Sequence[str]] = None):
     parser.add_argument("--python-bin", default="py")
     parser.add_argument("--preflight-device", default="cpu")
     parser.add_argument("--preflight-checkpoint", default=None)
+    parser.add_argument(
+        "--trust-preflight-checkpoint",
+        action="store_true",
+        help="Acknowledge that the preflight dill checkpoint is trusted and may execute code.",
+    )
     parser.add_argument("--preflight-require-timestamps", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--preflight-timestamp-max-delta", type=float, default=None)
     parser.add_argument("--preflight-timestamp-max-step", type=float, default=None)
@@ -720,6 +727,7 @@ def main(argv: Optional[Sequence[str]] = None):
         python_bin=args.python_bin,
         preflight_device=args.preflight_device,
         preflight_checkpoint=args.preflight_checkpoint,
+        trust_preflight_checkpoint=args.trust_preflight_checkpoint,
         preflight_require_timestamps=args.preflight_require_timestamps,
         preflight_timestamp_max_delta=args.preflight_timestamp_max_delta,
         preflight_timestamp_max_step=args.preflight_timestamp_max_step,

@@ -19,6 +19,7 @@ decode to a full-res heatmap image, and compute:
 Usage:
   .venv/bin/python scripts/ops/eval_multimodal_heatmap.py \
     --checkpoint <run>/checkpoints/latest.ckpt \
+    --trust-checkpoint \
     --val-zarr data/hot3d_open_val.zarr \
     --n-samples 128 --device cuda:0 \
     --output-json <run>/multimodal_eval.json
@@ -29,8 +30,9 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 from scipy.ndimage import maximum_filter
+from diffusion_policy.common.omegaconf_resolvers import register_safe_omegaconf_resolvers
 
-OmegaConf.register_new_resolver("eval", eval, replace=True)
+register_safe_omegaconf_resolvers()
 
 from diffusion_policy.scripts.eval_gaze_wam_metrics import load_policy_for_eval
 
@@ -73,6 +75,11 @@ def spatial_entropy(p):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint", required=True)
+    ap.add_argument(
+        "--trust-checkpoint",
+        action="store_true",
+        help="Acknowledge that the dill checkpoint is trusted and may execute code.",
+    )
     ap.add_argument("--val-zarr", default="data/hot3d_open_val.zarr")
     ap.add_argument("--n-samples", type=int, default=128)
     ap.add_argument("--batch-size", type=int, default=16)
@@ -82,7 +89,12 @@ def main():
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
-    policy, cfg = load_policy_for_eval(checkpoint=args.checkpoint, device=args.device, use_ema=True)
+    policy, cfg = load_policy_for_eval(
+        checkpoint=args.checkpoint,
+        device=args.device,
+        use_ema=True,
+        trust_checkpoint=args.trust_checkpoint,
+    )
     policy.eval()
 
     # Build val dataset from the checkpoint cfg's open_dataset spec, pointed at val zarr.

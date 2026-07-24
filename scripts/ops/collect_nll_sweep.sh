@@ -58,7 +58,7 @@ for d in "${run_dirs[@]}"; do
   log="$SWEEP_DIR/logs/eval_${name}.log"
   echo "[gpu $gpu] eval $name"
   CUDA_VISIBLE_DEVICES=$gpu HF_HUB_OFFLINE=1 "$PYTHON" scripts/ops/eval_multimodal_heatmap.py \
-    --checkpoint "$ck" --val-zarr "$VAL_ZARR" --n-samples "$N_SAMPLES" \
+    --checkpoint "$ck" --trust-checkpoint --val-zarr "$VAL_ZARR" --n-samples "$N_SAMPLES" \
     --device cuda:0 --output-json "$out" > "$log" 2>&1 &
   pids+=($!)
   gpu=$(( (gpu + 1) % 8 ))

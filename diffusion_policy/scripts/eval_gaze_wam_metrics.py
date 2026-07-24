@@ -74,7 +74,11 @@ def _ensure_hydra_runtime():
         hydra = _hydra
         OmegaConf = _OmegaConf
         hydra_module = hydra
-    OmegaConf.register_new_resolver("eval", eval, replace=True)
+    from diffusion_policy.common.omegaconf_resolvers import (
+        register_safe_omegaconf_resolvers,
+    )
+
+    register_safe_omegaconf_resolvers()
     return hydra_module
 
 
@@ -472,15 +476,26 @@ def load_policy_for_eval(
     device: str = "cpu",
     use_ema: bool = True,
     overrides: Optional[Sequence[str]] = None,
+    trust_checkpoint: bool = False,
 ) -> Tuple[GazeWamPolicy, object]:
     hydra = _ensure_hydra_runtime()
     torch = _ensure_torch_runtime()
     import dill
+    from diffusion_policy.common.checkpoint_security import require_trusted_pickle_artifact
 
     overrides = list(overrides or [])
     device_obj = torch.device(device)
     if checkpoint is not None:
-        payload = torch.load(open(checkpoint, "rb"), pickle_module=dill, map_location=device_obj)
+        checkpoint = require_trusted_pickle_artifact(
+            checkpoint,
+            trusted=trust_checkpoint,
+            artifact_name="Gaze-WAM checkpoint",
+        )
+        payload = torch.load(
+            checkpoint.open("rb"),
+            pickle_module=dill,
+            map_location=device_obj,
+        )
         cfg = payload["cfg"]
         if overrides:
             override_cfg = OmegaConf.from_dotlist(overrides)
@@ -658,6 +673,11 @@ def evaluate_gaze_wam_sources(
 def parse_args(argv: Optional[Sequence[str]] = None):
     parser = argparse.ArgumentParser(description="Offline Gaze-WAM action/heatmap/GDR evaluation.")
     parser.add_argument("--checkpoint", default=None, help="Optional workspace checkpoint path.")
+    parser.add_argument(
+        "--trust-checkpoint",
+        action="store_true",
+        help="Acknowledge that the supplied dill checkpoint is trusted and may execute code.",
+    )
     parser.add_argument("--config-name", default=None, help="Hydra config name when no checkpoint is used.")
     parser.add_argument(
         "--override",
@@ -708,6 +728,7 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, float]:
         device=args.device,
         use_ema=args.use_ema,
         overrides=args.override,
+        trust_checkpoint=args.trust_checkpoint,
     )
     sources = [item.strip() for item in args.sources.split(",") if item.strip()]
     metrics = evaluate_gaze_wam_sources(

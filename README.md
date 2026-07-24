@@ -62,6 +62,19 @@ export PYTHONPATH=$(pwd):$PYTHONPATH
 `zarr<3` is required — the data conversion scripts use the zarr v2
 `DirectoryStore` API.
 
+## Security boundaries
+
+- Hydra keeps the legacy `${eval:...}` config spelling for compatibility, but
+  it is implemented by a restricted numeric-arithmetic parser. Python names,
+  attributes, calls, imports, and non-finite or excessive results are rejected.
+- Workspace `.ckpt` and snapshot files use dill/pickle and can execute code
+  while loading. Public evaluation, preview, preflight, and deployment APIs
+  reject them by default. Pass `--trust-checkpoint` (or
+  `trust_checkpoint=True`) only for a checkpoint whose source you trust.
+- Training resume explicitly trusts only the checkpoint selected from its own
+  run output directory. The bundled checkpoint preview watchers likewise mark
+  their same-run checkpoints as trusted.
+
 ## Pretrained weights
 
 Two checkpoints are pulled from Hugging Face on first use:
@@ -149,7 +162,8 @@ for the empirical decomposition of which loss components actually contribute.
 ## Evaluate / compare
 
 ```shell
-python scripts/eval_gaze_wam_metrics.py            # gaze-prediction metrics
+python scripts/eval_gaze_wam_metrics.py \
+  --checkpoint /trusted/run/checkpoints/latest.ckpt --trust-checkpoint
 python scripts/compare_gaze_wam_ablation_metrics.py
 ```
 

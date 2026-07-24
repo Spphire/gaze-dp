@@ -1294,6 +1294,7 @@ def _load_policy_for_contract(
     device: str,
     use_ema: bool,
     overrides: Optional[Sequence[str]] = None,
+    trust_checkpoint: bool = False,
 ):
     _ensure_preflight_runtime()
     if checkpoint is not None:
@@ -1303,6 +1304,7 @@ def _load_policy_for_contract(
             device=device,
             use_ema=use_ema,
             overrides=overrides,
+            trust_checkpoint=trust_checkpoint,
         )
     else:
         policy = hydra.utils.instantiate(cfg.policy)
@@ -1357,6 +1359,7 @@ def preflight_gaze_wam(
     timestamp_max_delta: Optional[float] = None,
     timestamp_max_step: Optional[float] = None,
     fail_on_zarr_warning: bool = False,
+    trust_checkpoint: bool = False,
 ) -> Dict[str, object]:
     """Run local sanity checks before long Gaze-WAM training/evaluation jobs."""
     _ensure_preflight_runtime()
@@ -1681,6 +1684,7 @@ def preflight_gaze_wam(
             device=device,
             use_ema=use_ema,
             overrides=overrides,
+            trust_checkpoint=trust_checkpoint,
         )
         contract = _policy_contract_summary(policy, cfg)
         summary["policy_contract"] = contract
@@ -1798,6 +1802,11 @@ def parse_args(argv: Optional[Sequence[str]] = None):
     parser.add_argument("--config-name", required=True)
     parser.add_argument("--override", action="append", default=[])
     parser.add_argument("--checkpoint", default=None)
+    parser.add_argument(
+        "--trust-checkpoint",
+        action="store_true",
+        help="Acknowledge that the supplied dill checkpoint is trusted and may execute code.",
+    )
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--use-ema", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--skip-zarr-validation", action="store_true")
@@ -1824,6 +1833,7 @@ def main(argv: Optional[Sequence[str]] = None):
         timestamp_max_delta=args.timestamp_max_delta,
         timestamp_max_step=args.timestamp_max_step,
         fail_on_zarr_warning=args.fail_on_zarr_warning,
+        trust_checkpoint=args.trust_checkpoint,
     )
     text = json.dumps(summary, indent=2, sort_keys=True)
     print(text)

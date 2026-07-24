@@ -337,6 +337,7 @@ def compare_gaze_wam_ablation_metrics(
     require_timestamps: bool = False,
     timestamp_max_delta: Optional[float] = None,
     timestamp_max_step: Optional[float] = None,
+    trust_checkpoint: bool = False,
 ) -> List[Dict[str, object]]:
     """Evaluate multiple Gaze-WAM configs/checkpoints and return table-like rows."""
     import torch
@@ -372,6 +373,7 @@ def compare_gaze_wam_ablation_metrics(
             device=device,
             use_ema=use_ema,
             overrides=merged_overrides,
+            trust_checkpoint=trust_checkpoint,
         )
         metrics = evaluate_gaze_wam_sources(
             policy=policy,
@@ -459,6 +461,11 @@ def parse_args(argv: Optional[Sequence[str]] = None):
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--use-ema", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--trust-checkpoint",
+        action="store_true",
+        help="Acknowledge that all supplied dill checkpoints are trusted and may execute code.",
+    )
     parser.add_argument("--skip-denoising-loss", action="store_true")
     parser.add_argument("--skip-sampling", action="store_true")
     parser.add_argument("--skip-heatmap", action="store_true")
@@ -498,6 +505,7 @@ def main(argv: Optional[Sequence[str]] = None) -> List[Dict[str, object]]:
         require_timestamps=args.require_timestamps,
         timestamp_max_delta=args.timestamp_max_delta,
         timestamp_max_step=args.timestamp_max_step,
+        trust_checkpoint=args.trust_checkpoint,
     )
     print(json.dumps(rows, indent=2, sort_keys=True))
     if args.output_json is not None:

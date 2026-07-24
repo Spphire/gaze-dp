@@ -128,6 +128,7 @@ def preview_gaze_wam_episode(
     still_indices: Optional[Sequence[int]] = None,
     sample_seed: Optional[int] = None,
     overrides: Optional[Sequence[str]] = None,
+    trust_checkpoint: bool = False,
 ) -> Dict[str, object]:
     if batch_size <= 0:
         raise ValueError("batch_size must be positive.")
@@ -141,6 +142,7 @@ def preview_gaze_wam_episode(
         device=device,
         use_ema=use_ema,
         overrides=overrides,
+        trust_checkpoint=trust_checkpoint,
     )
     ema_summary = _checkpoint_ema_summary(cfg, use_ema_requested=use_ema)
     dataset = _instantiate_dataset(cfg, source=source, split=split)
@@ -329,6 +331,11 @@ def parse_args(argv: Optional[Sequence[str]] = None):
         description="Render a full Gaze-WAM episode with predicted vs GT heatmap comparison."
     )
     parser.add_argument("--checkpoint", required=True)
+    parser.add_argument(
+        "--trust-checkpoint",
+        action="store_true",
+        help="Acknowledge that the dill checkpoint is trusted and may execute code.",
+    )
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--source", choices=["open", "robot"], default="open")
     parser.add_argument("--split", choices=["train", "val"], default="val")
@@ -366,6 +373,7 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, object]:
         still_indices=_parse_int_list(args.still_indices),
         sample_seed=args.sample_seed,
         overrides=args.override,
+        trust_checkpoint=args.trust_checkpoint,
     )
     print(json.dumps(summary, indent=2))
     return summary

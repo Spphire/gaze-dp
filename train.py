@@ -15,10 +15,10 @@ sys.stderr = open(sys.stderr.fileno(), mode='w', buffering=1)
 import hydra
 from omegaconf import OmegaConf
 import pathlib
+from diffusion_policy.common.omegaconf_resolvers import register_safe_omegaconf_resolvers
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
 
-# allows arbitrary python code execution in configs using the ${eval:''} resolver
-OmegaConf.register_new_resolver("eval", eval, replace=True)
+register_safe_omegaconf_resolvers()
 
 ALLOWED_WORKSPACE_TARGETS = frozenset(
     {

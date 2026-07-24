@@ -27,6 +27,7 @@ from omegaconf import OmegaConf, open_dict
 from torch.utils.data import DataLoader
 
 from diffusion_policy.common.checkpoint_util import TopKCheckpointManager
+from diffusion_policy.common.omegaconf_resolvers import register_safe_omegaconf_resolvers
 from diffusion_policy.common.gaze_wam_dataloader_checks import (
     _check_training_dataloader_lengths,
     _check_training_dataset_lengths,
@@ -64,7 +65,7 @@ from diffusion_policy.model.gaze_wam.routing import loss_routing_summary
 from diffusion_policy.policy.gaze_wam_policy import GazeWamPolicy
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
 
-OmegaConf.register_new_resolver("eval", eval, replace=True)
+register_safe_omegaconf_resolvers()
 
 
 def _to_float(value):
@@ -1898,7 +1899,7 @@ class TrainGazeWamWorkspace(BaseWorkspace):
             latest_ckpt_path = self.get_checkpoint_path()
             if latest_ckpt_path.is_file():
                 print(f"Resuming from checkpoint {latest_ckpt_path}")
-                self.load_checkpoint(path=latest_ckpt_path)
+                self.load_checkpoint(path=latest_ckpt_path, trust_checkpoint=True)
                 resume_epoch = cfg.training.get("resume_epoch", None)
                 if resume_epoch is not None:
                     self.epoch = int(resume_epoch)
@@ -2009,15 +2010,25 @@ class TrainGazeWamWorkspace(BaseWorkspace):
         cfg = _stamp_training_scale_into_cfg(cfg, training_contract)
         self.cfg = cfg
         normalizer_path = os.path.join(self.output_dir, "normalizer.pkl")
+        normalizer_state_path = os.path.join(self.output_dir, "normalizer_state.pt")
         if accelerator.is_main_process:
             if use_robot_data:
                 normalizer = robot_dataset.get_normalizer()
             else:
                 normalizer = _make_heatmap_only_identity_normalizer(cfg.task.camera_key)
-            pickle.dump(normalizer, open(normalizer_path, "wb"))
+            with open(normalizer_path, "wb") as normalizer_file:
+                pickle.dump(normalizer, normalizer_file)
+            torch.save(normalizer.state_dict(), normalizer_state_path)
 
         accelerator.wait_for_everyone()
-        normalizer = pickle.load(open(normalizer_path, "rb"))
+        normalizer = LinearNormalizer()
+        normalizer.load_state_dict(
+            torch.load(
+                normalizer_state_path,
+                map_location="cpu",
+                weights_only=True,
+            )
+        )
 
         self.model.set_normalizer(normalizer)
         if cfg.training.use_ema:

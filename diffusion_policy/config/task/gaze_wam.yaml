@@ -23,7 +23,7 @@ heatmap_num_tokens: 256
 heatmap_dim: 16
 heatmap_token_grid: [16, 16]
 heatmap_sigma_tokens: 1.25
-temporal_heatmap_mode: off
+temporal_heatmap_mode: "off"
 temporal_heatmap_window_radius: 30
 temporal_heatmap_beta: 10.0
 temporal_heatmap_sigma_px: 6.0

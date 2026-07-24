@@ -1343,11 +1343,17 @@ def test_cached_dual_stream_transformer_shapes_and_world_cache():
         raise AssertionError("Expected mismatched world cache batch to fail.")
 
 
-def test_cached_dual_stream_policy_patchified_heatmap_prediction_decode():
+def test_cached_dual_stream_policy_patchified_heatmap_prediction_decode(tmp_path):
     scheduler = DDPMScheduler(
         num_train_timesteps=10,
         beta_schedule="squaredcos_cap_v2",
         prediction_type="epsilon",
+    )
+    encoder_path, decoder_path = _write_fake_cosmos_jit_pair(
+        tmp_path,
+        image_size=(8, 8),
+        token_grid=(2, 2),
+        latent_channels=4,
     )
     policy = GazeWamPolicy(
         shape_meta={"action": {"shape": [10], "horizon": 4}},
@@ -1361,6 +1367,8 @@ def test_cached_dual_stream_policy_patchified_heatmap_prediction_decode():
         heatmap_dim=16,
         heatmap_token_grid=(2, 2),
         heatmap_image_size=(8, 8),
+        heatmap_cosmos_encoder_path=encoder_path,
+        heatmap_cosmos_decoder_path=decoder_path,
         n_layer=1,
         n_head=4,
         n_emb=32,
@@ -6074,6 +6082,7 @@ def test_gaze_wam_zarr_deployment_rehearsal_records_json_and_missing_gaze():
             "tcp_pose_key": "tcp_pose_abs",
             "gripper_key": "gripper_width",
             "gaze_key": "gaze_xy",
+            "heatmap_key": "gaze_heatmap",
             "action_base_abs_key": None,
             "timestamp_key": None,
             "episode_index": 0,
@@ -12088,7 +12097,14 @@ def test_compare_gaze_wam_ablation_metrics_records_dino_source_path_types():
 def test_compare_gaze_wam_ablation_metrics_applies_overrides_to_checkpoint_cfg(monkeypatch):
     calls = {}
 
-    def fake_load_policy_for_eval(cfg, checkpoint, device, use_ema, overrides=None):
+    def fake_load_policy_for_eval(
+        cfg,
+        checkpoint,
+        device,
+        use_ema,
+        overrides=None,
+        trust_checkpoint=False,
+    ):
         calls["cfg_arg"] = cfg
         calls["checkpoint"] = checkpoint
         calls["device"] = device
@@ -12170,7 +12186,14 @@ def test_compare_gaze_wam_ablation_metrics_applies_overrides_to_checkpoint_cfg(m
 def test_compare_gaze_wam_ablation_metrics_applies_variant_overrides(monkeypatch):
     load_calls = []
 
-    def fake_load_policy_for_eval(cfg, checkpoint, device, use_ema, overrides=None):
+    def fake_load_policy_for_eval(
+        cfg,
+        checkpoint,
+        device,
+        use_ema,
+        overrides=None,
+        trust_checkpoint=False,
+    ):
         load_calls.append(list(overrides or []))
         cfg_after_overrides = load_cfg("train_gaze_wam_debug_workspace", overrides=overrides)
         return object(), cfg_after_overrides
@@ -12230,7 +12253,14 @@ def test_compare_gaze_wam_ablation_metrics_applies_variant_overrides(monkeypatch
 
 
 def test_compare_gaze_wam_ablation_metrics_uses_strict_bool_provenance(monkeypatch):
-    def fake_load_policy_for_eval(cfg, checkpoint, device, use_ema, overrides=None):
+    def fake_load_policy_for_eval(
+        cfg,
+        checkpoint,
+        device,
+        use_ema,
+        overrides=None,
+        trust_checkpoint=False,
+    ):
         cfg_after_overrides = load_cfg("train_gaze_wam_debug_workspace")
         cfg_after_overrides.task.robot_heatmap_on_gaze_dropout = "false"
         cfg_after_overrides.task.robot_dataset.action_padding = "off"
@@ -12276,7 +12306,14 @@ def test_compare_gaze_wam_ablation_metrics_uses_strict_bool_provenance(monkeypat
 
 
 def test_compare_gaze_wam_ablation_metrics_rejects_boolean_cfg_scale(monkeypatch):
-    def fake_load_policy_for_eval(cfg, checkpoint, device, use_ema, overrides=None):
+    def fake_load_policy_for_eval(
+        cfg,
+        checkpoint,
+        device,
+        use_ema,
+        overrides=None,
+        trust_checkpoint=False,
+    ):
         cfg_after_overrides = load_cfg("train_gaze_wam_debug_workspace")
         cfg_after_overrides.policy.cfg_scale = True
         return object(), cfg_after_overrides

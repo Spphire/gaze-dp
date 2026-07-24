@@ -10,12 +10,14 @@ import torch
 from omegaconf import OmegaConf
 
 from diffusion_policy.common.pytorch_util import dict_apply
+from diffusion_policy.common.checkpoint_security import require_trusted_pickle_artifact
+from diffusion_policy.common.omegaconf_resolvers import register_safe_omegaconf_resolvers
 from diffusion_policy.policy.gaze_wam_policy import GazeWamPolicy
 from diffusion_policy.real_world.gaze_wam_action_base import action_base_abs_to_10d
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
 from diffusion_policy.common.pose_util import mat_to_pose10d, pose_to_mat
 
-OmegaConf.register_new_resolver("eval", eval, replace=True)
+register_safe_omegaconf_resolvers()
 
 
 def _require_finite_array(name: str, value: np.ndarray) -> None:
@@ -131,11 +133,17 @@ def load_gaze_wam_policy_from_checkpoint(
     device: str = "cuda:0",
     use_ema: bool = True,
     num_inference_steps: Optional[int] = None,
+    trust_checkpoint: bool = False,
 ) -> Tuple[GazeWamPolicy, object]:
     ckpt_path = pathlib.Path(checkpoint_path)
     if ckpt_path.is_dir():
         ckpt_path = ckpt_path / "checkpoints" / "latest.ckpt"
-    payload = torch.load(open(ckpt_path, "rb"), pickle_module=dill, map_location=device)
+    ckpt_path = require_trusted_pickle_artifact(
+        ckpt_path,
+        trusted=trust_checkpoint,
+        artifact_name="Gaze-WAM checkpoint",
+    )
+    payload = torch.load(ckpt_path.open("rb"), pickle_module=dill, map_location=device)
     cfg = payload["cfg"]
     workspace_cls = hydra.utils.get_class(cfg._target_)
     workspace: BaseWorkspace = workspace_cls(cfg)
@@ -199,12 +207,14 @@ class GazeWamInferenceAdapter:
         num_inference_steps: Optional[int] = None,
         camera_key: str = "camera0_rgb",
         cfg_scale: float = 1.0,
+        trust_checkpoint: bool = False,
     ) -> "GazeWamInferenceAdapter":
         policy, cfg = load_gaze_wam_policy_from_checkpoint(
             checkpoint_path=checkpoint_path,
             device=device,
             use_ema=use_ema,
             num_inference_steps=num_inference_steps,
+            trust_checkpoint=trust_checkpoint,
         )
         return cls(
             policy=policy,

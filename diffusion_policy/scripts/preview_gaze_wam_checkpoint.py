@@ -194,6 +194,7 @@ def preview_gaze_wam_checkpoint(
     sample_indices: Optional[Sequence[int]] = None,
     sample_seed: Optional[int] = None,
     overrides: Optional[Sequence[str]] = None,
+    trust_checkpoint: bool = False,
 ) -> Dict[str, object]:
     max_samples = max(1, int(max_samples))
     policy, cfg = load_policy_for_eval(
@@ -201,6 +202,7 @@ def preview_gaze_wam_checkpoint(
         device=device,
         use_ema=use_ema,
         overrides=overrides,
+        trust_checkpoint=trust_checkpoint,
     )
     ema_summary = _checkpoint_ema_summary(cfg, use_ema_requested=use_ema)
     dataset = _instantiate_dataset(cfg, source=source, split=split)
@@ -402,6 +404,11 @@ def preview_gaze_wam_checkpoint(
 def parse_args(argv: Optional[Sequence[str]] = None):
     parser = argparse.ArgumentParser(description="Reload a Gaze-WAM checkpoint and save full-res heatmap previews.")
     parser.add_argument("--checkpoint", required=True)
+    parser.add_argument(
+        "--trust-checkpoint",
+        action="store_true",
+        help="Acknowledge that the dill checkpoint is trusted and may execute code.",
+    )
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--source", choices=["open", "robot"], default="open")
     parser.add_argument("--split", choices=["train", "val"], default="val")
@@ -429,6 +436,7 @@ def main(argv: Optional[Sequence[str]] = None) -> Dict[str, object]:
         sample_indices=_parse_sample_indices(args.sample_indices),
         sample_seed=args.sample_seed,
         overrides=args.override,
+        trust_checkpoint=args.trust_checkpoint,
     )
     print(json.dumps(summary, indent=2))
     return summary

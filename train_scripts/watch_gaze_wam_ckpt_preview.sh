@@ -57,6 +57,7 @@ preview_once() {
   local args=(
     -m diffusion_policy.scripts.preview_gaze_wam_checkpoint
     --checkpoint "$ckpt"
+    --trust-checkpoint
     --output-dir "$output_dir"
     --source "$SOURCE"
     --split "$SPLIT"

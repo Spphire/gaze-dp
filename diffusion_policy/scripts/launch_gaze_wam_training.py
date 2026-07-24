@@ -1440,6 +1440,7 @@ def launch_gaze_wam_training(
     python_bin: str = "py",
     preflight_device: str = "cpu",
     preflight_checkpoint: Optional[str] = None,
+    trust_preflight_checkpoint: bool = False,
     skip_preflight: bool = False,
     skip_zarr_validation: bool = False,
     skip_loss_smoke: bool = False,
@@ -1544,6 +1545,7 @@ def launch_gaze_wam_training(
             config_name=config_name,
             overrides=[f"task={task}"] + overrides,
             checkpoint=preflight_checkpoint,
+            trust_checkpoint=trust_preflight_checkpoint,
             device=preflight_device,
             validate_zarr=not skip_zarr_validation,
             run_loss_smoke=not skip_loss_smoke,
@@ -1600,6 +1602,11 @@ def parse_args(argv: Optional[Sequence[str]] = None):
     parser.add_argument("--python-bin", default="py")
     parser.add_argument("--preflight-device", default="cpu")
     parser.add_argument("--preflight-checkpoint", default=None)
+    parser.add_argument(
+        "--trust-preflight-checkpoint",
+        action="store_true",
+        help="Acknowledge that the preflight dill checkpoint is trusted and may execute code.",
+    )
     parser.add_argument("--skip-preflight", action="store_true")
     parser.add_argument("--skip-zarr-validation", action="store_true")
     parser.add_argument("--skip-loss-smoke", action="store_true")
@@ -1649,6 +1656,7 @@ def main(argv: Optional[Sequence[str]] = None):
         python_bin=args.python_bin,
         preflight_device=args.preflight_device,
         preflight_checkpoint=args.preflight_checkpoint,
+        trust_preflight_checkpoint=args.trust_preflight_checkpoint,
         skip_preflight=args.skip_preflight,
         skip_zarr_validation=args.skip_zarr_validation,
         skip_loss_smoke=args.skip_loss_smoke,
