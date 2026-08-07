@@ -857,16 +857,29 @@ def validate_gaze_wam_zarr(
         heatmap_token_grid,
         errors,
     )
-    if image_size_checked is not None and None not in image_size_checked:
+    image_size_valid = image_size_checked is not None and all(
+        value is not None and value > 0 for value in image_size_checked
+    )
+    heatmap_token_grid_valid = heatmap_token_grid_checked is not None and all(
+        value is not None and value > 0 for value in heatmap_token_grid_checked
+    )
+    if image_size_valid:
         image_size = image_size_checked
-    if heatmap_token_grid_checked is not None and None not in heatmap_token_grid_checked:
+    if heatmap_token_grid_valid:
         heatmap_token_grid = heatmap_token_grid_checked
     gaze_key = _as_optional_key(gaze_key)
     heatmap_key = _as_optional_key(heatmap_key)
     if heatmap_dim is None:
-        heatmap_dim = int(image_size[0] // heatmap_token_grid[0]) * int(
-            image_size[1] // heatmap_token_grid[1]
+        geometry_valid = (
+            image_size_valid
+            and heatmap_token_grid_valid
         )
+        if geometry_valid:
+            heatmap_dim = int(image_size[0] // heatmap_token_grid[0]) * int(
+                image_size[1] // heatmap_token_grid[1]
+            )
+        else:
+            heatmap_dim = 1
     heatmap_dim_checked = _validate_positive_int_arg("heatmap_dim", heatmap_dim, errors)
     action_dim_checked = _validate_positive_int_arg("action_dim", action_dim, errors)
     if heatmap_dim_checked is not None:

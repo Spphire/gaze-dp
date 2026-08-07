@@ -1,9 +1,9 @@
 defaults:
-  - train_gaze_wam_open_only_workspace
+  - train_gaze_wam_robot_only_workspace
   - _self_
 
-name: train_gaze_wam_open_only_debug
-exp_name: "open_only_debug"
+name: train_gaze_wam_robot_only_debug
+exp_name: "robot_only_debug"
 
 task:
   robot_dataset_path: data/debug_gaze_wam/robot.zarr
@@ -18,41 +18,38 @@ policy:
   p_drop_emb: 0.0
   p_drop_attn: 0.0
 
-open_dataloader:
-  batch_size: 4
-  num_workers: 0
-  pin_memory: false
-  persistent_workers: false
-
-val_open_dataloader:
-  batch_size: 4
-  num_workers: 0
-  pin_memory: false
-  persistent_workers: false
-
 data_mixing:
   batch_size_source: ratio
-  total_batch_size_per_process: 4
-  robot_ratio: 0.0
-  open_ratio: 1.0
-  robot_tail_policy: drop
-  open_tail_policy: pad
+  total_batch_size_per_process: 3
+  robot_ratio: 1.0
+  open_ratio: 0.0
+  robot_tail_policy: pad
+  open_tail_policy: drop
   validation_tail_policy: keep
 
+robot_dataloader:
+  batch_size: 3
+  num_workers: 0
+  pin_memory: false
+  persistent_workers: false
+
+val_robot_dataloader:
+  batch_size: 3
+  num_workers: 0
+  pin_memory: false
+  persistent_workers: false
+
 training:
+  stage: robot_only
   debug: true
   require_amp: false
   num_epochs: 1
   max_train_steps: 2
   use_ema: false
-  freeze_encoder: false
   checkpoint_every: 1000
   val_every: 1
   max_val_steps: 1
-  val_mixing_seed: 100003
   sample_every: 1000
-  save_val_heatmap_preview: true
-  val_heatmap_preview_max_samples: 2
   lr_warmup_steps: 1
 
 logging:

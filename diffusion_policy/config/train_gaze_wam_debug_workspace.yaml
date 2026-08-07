@@ -30,6 +30,16 @@ open_dataloader:
   pin_memory: false
   persistent_workers: false
 
+data_mixing:
+  # Debug keeps legacy dataloader overrides convenient; full configs use ratio.
+  batch_size_source: auto
+  total_batch_size_per_process: 4
+  robot_ratio: 0.75
+  open_ratio: 0.25
+  robot_tail_policy: pad
+  open_tail_policy: pad
+  validation_tail_policy: keep
+
 val_robot_dataloader:
   batch_size: 3
   num_workers: 0

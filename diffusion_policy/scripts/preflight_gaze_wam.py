@@ -77,6 +77,8 @@ def _ensure_preflight_runtime():
     global OmegaConf
     global as_optional_gaze_wam_key
     global build_gaze_wam_mixed_batch
+    global build_gaze_wam_dataloader
+    global gaze_wam_dataloader_kwargs
     global dict_apply
     global hydra
     global load_cfg
@@ -120,6 +122,10 @@ def _ensure_preflight_runtime():
         from diffusion_policy.dataset.gaze_wam_mixing import (
             build_gaze_wam_mixed_batch as _build_gaze_wam_mixed_batch,
         )
+        from diffusion_policy.dataset.gaze_wam_batching import (
+            build_gaze_wam_dataloader as _build_gaze_wam_dataloader,
+            gaze_wam_dataloader_kwargs as _gaze_wam_dataloader_kwargs,
+        )
         from diffusion_policy.model.common.normalizer import (
             LinearNormalizer as _LinearNormalizer,
             SingleFieldLinearNormalizer as _SingleFieldLinearNormalizer,
@@ -159,6 +165,8 @@ def _ensure_preflight_runtime():
         OmegaConf = _OmegaConf
         as_optional_gaze_wam_key = _as_optional_gaze_wam_key
         build_gaze_wam_mixed_batch = _build_gaze_wam_mixed_batch
+        build_gaze_wam_dataloader = _build_gaze_wam_dataloader
+        gaze_wam_dataloader_kwargs = _gaze_wam_dataloader_kwargs
         dict_apply = _dict_apply
         hydra = _hydra
         load_cfg = _load_cfg
@@ -413,6 +421,7 @@ def _data_stream_contract_summary(cfg, training_config: Dict[str, object]) -> Di
         open_dataset_class=str(cfg.task.open_dataset.get("_target_", "")),
         robot_batch_size=int(training_config["robot_batch_size"]),
         open_batch_size=int(training_config["open_batch_size"]),
+        batching_config=training_config["batching"],
     )
 
 
@@ -443,8 +452,17 @@ def _check_data_stream_contract(contract: Dict[str, object]) -> Sequence[str]:
         errors.append("Gaze-WAM data stream must use build_gaze_wam_mixed_batch.")
     if mixing.get("mode") != "online_per_step_concat_after_fetch":
         errors.append("Gaze-WAM robot/open rows must be mixed online after per-step fetch.")
-    if mixing.get("ratio_source") != "robot_dataloader.batch_size/open_dataloader.batch_size":
-        errors.append("Gaze-WAM source ratio must be defined by the two dataloader batch sizes.")
+    if mixing.get("ratio_source") not in (
+        "robot_dataloader.batch_size/open_dataloader.batch_size",
+        "data_mixing.total_batch_size_per_process+"
+        "data_mixing.robot_ratio+data_mixing.open_ratio",
+    ):
+        errors.append(
+            "Gaze-WAM source ratio must be defined by the resolved source quotas."
+        )
+    for name in ("robot_tail_policy", "open_tail_policy"):
+        if mixing.get(name) not in ("keep", "drop", "pad"):
+            errors.append(f"Gaze-WAM {name} is invalid: {mixing.get(name)!r}.")
     return errors
 
 
@@ -1269,18 +1287,73 @@ def _check_policy_contract(summary: Dict[str, object], cfg) -> Sequence[str]:
     return errors
 
 
-def _preflight_loader_kwargs(dataloader_cfg) -> Dict[str, object]:
+def _preflight_loader_kwargs(
+    dataloader_cfg,
+    *,
+    batch_size: Optional[int] = None,
+    tail_policy: str = "keep",
+    source_name: str = "source",
+) -> Dict[str, object]:
     _ensure_preflight_runtime()
-    loader_kwargs = OmegaConf.to_container(dataloader_cfg, resolve=True)
-    loader_kwargs["shuffle"] = False
-    loader_kwargs["num_workers"] = 0
-    loader_kwargs["pin_memory"] = False
-    loader_kwargs["persistent_workers"] = False
-    return loader_kwargs
+    if batch_size is None:
+        loader_kwargs = OmegaConf.to_container(dataloader_cfg, resolve=True)
+        loader_kwargs["shuffle"] = False
+        loader_kwargs["num_workers"] = 0
+        loader_kwargs["pin_memory"] = False
+        loader_kwargs["persistent_workers"] = False
+        return loader_kwargs
+    return build_gaze_wam_dataloader_kwargs_for_preflight(
+        dataloader_cfg,
+        batch_size=batch_size,
+        tail_policy=tail_policy,
+        source_name=source_name,
+    )
 
 
-def _preflight_dataloader(dataset, dataloader_cfg):
-    return DataLoader(dataset, **_preflight_loader_kwargs(dataloader_cfg))
+def build_gaze_wam_dataloader_kwargs_for_preflight(
+    dataloader_cfg,
+    *,
+    batch_size: int,
+    tail_policy: str,
+    source_name: str,
+) -> Dict[str, object]:
+    """Build deterministic single-worker kwargs without importing DataLoader twice."""
+    kwargs = OmegaConf.to_container(dataloader_cfg, resolve=True)
+    kwargs["shuffle"] = False
+    kwargs["num_workers"] = 0
+    kwargs["pin_memory"] = False
+    kwargs["persistent_workers"] = False
+    return gaze_wam_dataloader_kwargs(
+        kwargs,
+        batch_size=batch_size,
+        tail_policy=tail_policy,
+        source_name=source_name,
+    )
+
+
+def _preflight_dataloader(
+    dataset,
+    dataloader_cfg,
+    *,
+    batch_size: Optional[int] = None,
+    tail_policy: str = "keep",
+    source_name: str = "source",
+):
+    if batch_size is None:
+        return DataLoader(dataset, **_preflight_loader_kwargs(dataloader_cfg))
+    return build_gaze_wam_dataloader(
+        dataset,
+        dataloader_cfg,
+        batch_size=batch_size,
+        tail_policy=tail_policy,
+        source_name=source_name,
+        runtime_overrides={
+            "shuffle": False,
+            "num_workers": 0,
+            "pin_memory": False,
+            "persistent_workers": False,
+        },
+    )
 
 
 def _first_batch(dataset, dataloader_cfg) -> Dict[str, torch.Tensor]:
@@ -1409,6 +1482,21 @@ def preflight_gaze_wam(
             ),
             "robot_batch_size": int(training_config["robot_batch_size"]),
             "open_batch_size": int(training_config["open_batch_size"]),
+            "training_stage": str(training_config["stage"]),
+            "batch_size_source": str(
+                training_config["batching"]["resolved_batch_size_source"]
+            ),
+            "total_batch_size_per_process": int(
+                training_config["batching"]["train_batch_size_per_process"]
+            ),
+            "robot_ratio": float(training_config["batching"]["robot_ratio"]),
+            "open_ratio": float(training_config["batching"]["open_ratio"]),
+            "robot_tail_policy": str(
+                training_config["batching"]["robot_tail_policy"]
+            ),
+            "open_tail_policy": str(
+                training_config["batching"]["open_tail_policy"]
+            ),
             "robot_dataset_sampling": _dataset_sampling_summary(cfg.task.robot_dataset),
             "open_dataset_sampling": _dataset_sampling_summary(cfg.task.open_dataset),
             "policy_target": str(cfg.policy._target_),
@@ -1545,6 +1633,9 @@ def preflight_gaze_wam(
             robot_preflight_dataloader = _preflight_dataloader(
                 robot_dataset,
                 cfg.robot_dataloader,
+                batch_size=robot_batch_size,
+                tail_policy=training_config["batching"]["robot_tail_policy"],
+                source_name="robot_train",
             )
         except Exception as exc:
             summary["errors"].append(
@@ -1555,6 +1646,9 @@ def preflight_gaze_wam(
             open_preflight_dataloader = _preflight_dataloader(
                 open_dataset,
                 cfg.open_dataloader,
+                batch_size=open_batch_size,
+                tail_policy=training_config["batching"]["open_tail_policy"],
+                source_name="open_train",
             )
         except Exception as exc:
             summary["errors"].append(

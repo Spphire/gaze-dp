@@ -1,0 +1,27 @@
+defaults:
+  - train_gaze_wam_open_only_workspace
+  - _self_
+
+name: train_gaze_wam_open_pretrain
+exp_name: "optional_open_pretrain_encoder_ablation"
+
+data_mixing:
+  batch_size_source: ratio
+  total_batch_size_per_process: 64
+  robot_ratio: 0.0
+  open_ratio: 1.0
+  robot_tail_policy: drop
+  open_tail_policy: pad
+  validation_tail_policy: keep
+
+training:
+  stage: open_pretrain
+  # This is a global optimizer-step budget, deliberately explicit.
+  max_train_steps: 5000
+  num_epochs: 200
+  gradient_accumulate_every: 1
+  freeze_encoder: false
+  transfer:
+    export_path: data/outputs/gaze_wam_open_pretrain_obs_encoder.pt
+    export_scope: obs_encoder
+    export_overwrite: false

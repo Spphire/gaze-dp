@@ -16,7 +16,7 @@ from diffusion_policy.model.gaze_wam.joint_transformer import (
 
 
 def _normalize_positive_int(name: str, value) -> int:
-    return normalize_gaze_wam_positive_int_field(name, value)
+    return normalize_gaze_wam_positive_int_field(name, value, default=None)
 
 
 def _normalize_optional_positive_int(name: str, value) -> Optional[int]:

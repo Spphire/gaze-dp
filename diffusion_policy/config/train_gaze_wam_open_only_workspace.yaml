@@ -43,8 +43,25 @@ val_open_dataloader:
   batch_size: 16
   num_workers: 1
 
+data_mixing:
+  batch_size_source: ratio
+  total_batch_size_per_process: 16
+  robot_ratio: 0.0
+  open_ratio: 1.0
+  robot_tail_policy: drop
+  open_tail_policy: pad
+  validation_tail_policy: keep
+
 training:
+  stage: open_only
   gdr_every: 0
   gradient_accumulate_every: 4
   freeze_encoder: true
   use_ema: false
+
+checkpoint:
+  topk:
+    monitor_key: val_loss
+    mode: min
+    k: 20
+    format_str: 'epoch={epoch:04d}-val_loss={val_loss:.3f}.ckpt'

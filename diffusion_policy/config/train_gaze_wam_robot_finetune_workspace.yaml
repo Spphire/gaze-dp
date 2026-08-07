@@ -1,0 +1,17 @@
+defaults:
+  - train_gaze_wam_robot_only_workspace
+  - _self_
+
+name: train_gaze_wam_robot_finetune
+exp_name: "robot_finetune_from_open_encoder"
+
+training:
+  stage: robot_finetune
+  # This path is produced by the explicit open_pretrain config.  The
+  # finetune stage restores robot action supervision and uses no open quota.
+  transfer:
+    load_path: data/outputs/gaze_wam_open_pretrain_obs_encoder.pt
+    load_scope: obs_encoder
+    export_path: ""
+    export_scope: obs_encoder
+    export_overwrite: false

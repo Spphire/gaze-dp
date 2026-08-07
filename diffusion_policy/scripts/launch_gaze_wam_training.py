@@ -159,6 +159,20 @@ def _training_acceleration_summary(
         "use_accelerate": bool(use_accelerate),
         "accelerate_config": accelerator_cfg,
         "training_config": training_config,
+        "stage": training_config.get("stage", "mixed_train"),
+        "batch_size_source": training_config.get("batching", {}).get(
+            "resolved_batch_size_source",
+            "dataloader",
+        ),
+        "requested_total_batch_size_per_process": training_config.get(
+            "batching", {}
+        ).get("requested_total_batch_size_per_process"),
+        "requested_robot_ratio": training_config.get("batching", {}).get(
+            "requested_robot_ratio"
+        ),
+        "requested_open_ratio": training_config.get("batching", {}).get(
+            "requested_open_ratio"
+        ),
         "task_routing_config": task_routing_config,
         "robot_batch_size_per_process": robot_batch_size,
         "open_batch_size_per_process": open_batch_size,
@@ -216,6 +230,7 @@ def _looks_like_debug_data_path(value) -> bool:
     parts = [part for part in text.split("/") if part]
     if not parts:
         return False
+    is_absolute = text.startswith("/") or parts[0].endswith(":")
     store_idx = next(
         (idx for idx, part in enumerate(parts) if part.endswith(".zarr")),
         len(parts) - 1,
@@ -225,7 +240,7 @@ def _looks_like_debug_data_path(value) -> bool:
     debug_markers = ("debug", "smoke", "synthetic")
     exact_markers = {"tmp", "temp"}
     return any(any(marker in part for marker in debug_markers) for part in parts) or any(
-        part in exact_markers for part in parts
+        not is_absolute and part in exact_markers for part in parts
     )
 
 
@@ -844,6 +859,20 @@ def check_real_data_readiness(
     total_batch_size = robot_batch_size + open_batch_size
     robot_ratio = robot_batch_size / total_batch_size if total_batch_size > 0 else 0.0
     open_ratio = open_batch_size / total_batch_size if total_batch_size > 0 else 0.0
+    batching_config = training_config.get("batching", {}) or {}
+    requested_robot_ratio = batching_config.get("requested_robot_ratio")
+    requested_open_ratio = batching_config.get("requested_open_ratio")
+    ratio_tolerance = (
+        0.5 / total_batch_size if total_batch_size > 0 else float("inf")
+    )
+    source_ratio_matches_config = (
+        requested_robot_ratio is not None
+        and requested_open_ratio is not None
+        and abs(robot_ratio - float(requested_robot_ratio))
+        <= ratio_tolerance + 1e-9
+        and abs(open_ratio - float(requested_open_ratio))
+        <= ratio_tolerance + 1e-9
+    )
     robot_gaze_dropout_prob = task_routing_config.get("robot_gaze_dropout_prob", 0.0)
     robot_heatmap_on_gaze_dropout = task_routing_config.get(
         "robot_heatmap_on_gaze_dropout",
@@ -1288,17 +1317,26 @@ def check_real_data_readiness(
         f"Real-data main launch requires open_dataloader.batch_size > 0; got {open_batch_size}.",
     )
     add_check(
-        "source_ratio_75_25",
+        "source_ratio_matches_configured_quota",
         (not enforce_main_contract)
-        or (
-            total_batch_size > 0
-            and abs(robot_ratio - 0.75) < 1e-9
-            and abs(open_ratio - 0.25) < 1e-9
-        ),
+        or source_ratio_matches_config,
         (
-            "Real-data main-contract launch requires a 75% robot / 25% open-source gaze batch ratio; "
+            "Real-data main-contract launch requires the configured total batch and "
+            "robot/open source quotas; "
             f"got robot={robot_batch_size}, open={open_batch_size}, "
-            f"robot_ratio={robot_ratio:.6g}, open_ratio={open_ratio:.6g}."
+            f"robot_ratio={robot_ratio:.6g}, open_ratio={open_ratio:.6g}, "
+            f"requested_robot_ratio={requested_robot_ratio!r}, "
+            f"requested_open_ratio={requested_open_ratio!r}."
+        ),
+    )
+    add_check(
+        "source_ratio_75_25",
+        (not enforce_main_contract) or source_ratio_matches_config,
+        (
+            "Deprecated compatibility alias: the historical default was "
+            "75% robot / 25% open-source gaze, while this run must match the "
+            "ratios declared in data_mixing; "
+            f"got robot_ratio={robot_ratio:.6g}, open_ratio={open_ratio:.6g}."
         ),
     )
     add_check(

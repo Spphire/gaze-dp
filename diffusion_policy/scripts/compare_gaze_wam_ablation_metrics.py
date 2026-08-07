@@ -7,14 +7,14 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from diffusion_policy.common.gaze_wam_training_config import (
     normalize_gaze_wam_bool_field,
     normalize_gaze_wam_nonnegative_float_field,
+    resolve_gaze_wam_batching_config,
 )
 from diffusion_policy.scripts.gaze_wam_provenance import add_provenance_contract
 
 
 DEFAULT_VARIANTS = (
-    "main=train_gaze_wam_workspace",
-    "cached_dual_stream=train_gaze_wam_cached_dual_stream_workspace",
-    "open_only=train_gaze_wam_open_only_workspace",
+    "robot_only_baseline=train_gaze_wam_robot_only_workspace",
+    "mixed_main=train_gaze_wam_workspace",
 )
 
 
@@ -77,6 +77,13 @@ def _flat_fieldnames(rows: Sequence[Dict[str, object]]) -> List[str]:
         "variant_overrides",
         "provenance_contract_version",
         "provenance_contract_id",
+        "training_stage",
+        "batch_size_source",
+        "requested_batch_size_source",
+        "total_batch_size_per_process",
+        "requested_total_batch_size_per_process",
+        "requested_robot_ratio",
+        "requested_open_ratio",
         "eval_sources",
         "eval_batch_size",
         "eval_max_batches",
@@ -151,19 +158,40 @@ def _config_provenance(
     max_batches: Optional[int],
     cfg_scale: Optional[float],
 ) -> Dict[str, object]:
+    batching = resolve_gaze_wam_batching_config(cfg)
+    if not batching["valid"]:
+        raise ValueError(
+            "Cannot build comparison provenance from an invalid Gaze-WAM batching "
+            "config: "
+            + "; ".join(str(error) for error in batching["errors"])
+        )
     stamped_robot_batch = cfg.training.get("robot_batch_size_per_process", None)
     stamped_open_batch = cfg.training.get("open_batch_size_per_process", None)
+    has_stamped_training_scale = (
+        stamped_robot_batch is not None and stamped_open_batch is not None
+    )
     robot_batch = (
         int(stamped_robot_batch)
-        if stamped_robot_batch is not None
-        else int(cfg.robot_dataloader.batch_size)
+        if has_stamped_training_scale
+        else int(batching["robot_batch_size"])
     )
     open_batch = (
         int(stamped_open_batch)
-        if stamped_open_batch is not None
-        else int(cfg.open_dataloader.get("batch_size", 0))
+        if has_stamped_training_scale
+        else int(batching["open_batch_size"])
     )
     total_batch = robot_batch + open_batch
+    mixing_cfg = cfg.get("data_mixing", None) or {}
+    resolved_batch_size_source = str(
+        cfg.training.get(
+            "batch_size_source",
+            mixing_cfg.get(
+                "resolved_batch_size_source",
+                batching["resolved_batch_size_source"],
+            ),
+        )
+    )
+    training_stage = str(cfg.training.get("stage", "mixed_train"))
     gradient_accumulate_every = int(cfg.training.get("gradient_accumulate_every", 1))
     num_processes = int(cfg.training.get("num_processes", 1))
     mixed_precision = str(cfg.training.get("mixed_precision", "no"))
@@ -272,6 +300,15 @@ def _config_provenance(
         "open_batch_size": open_batch,
         "robot_ratio": float(robot_batch / total_batch) if total_batch > 0 else 0.0,
         "open_ratio": float(open_batch / total_batch) if total_batch > 0 else 0.0,
+        "training_stage": training_stage,
+        "batch_size_source": resolved_batch_size_source,
+        "requested_batch_size_source": batching["batch_size_source"],
+        "total_batch_size_per_process": int(total_batch),
+        "requested_total_batch_size_per_process": batching.get(
+            "requested_total_batch_size_per_process"
+        ),
+        "requested_robot_ratio": batching.get("requested_robot_ratio"),
+        "requested_open_ratio": batching.get("requested_open_ratio"),
         "gradient_accumulate_every": gradient_accumulate_every,
         "num_processes": num_processes,
         "mixed_precision": mixed_precision,
@@ -375,6 +412,14 @@ def compare_gaze_wam_ablation_metrics(
             overrides=merged_overrides,
             trust_checkpoint=trust_checkpoint,
         )
+        provenance = _config_provenance(
+            cfg=cfg,
+            checkpoint=parsed["checkpoint"],
+            sources=sources,
+            batch_size=batch_size,
+            max_batches=max_batches,
+            cfg_scale=cfg_scale,
+        )
         metrics = evaluate_gaze_wam_sources(
             policy=policy,
             cfg=cfg,
@@ -394,14 +439,6 @@ def compare_gaze_wam_ablation_metrics(
             timestamp_max_delta=timestamp_max_delta,
             timestamp_max_step=timestamp_max_step,
             robot_gaze_dropout_seed=seed,
-        )
-        provenance = _config_provenance(
-            cfg=cfg,
-            checkpoint=parsed["checkpoint"],
-            sources=sources,
-            batch_size=batch_size,
-            max_batches=max_batches,
-            cfg_scale=cfg_scale,
         )
         rows.append(
             {
@@ -428,7 +465,8 @@ def parse_args(argv: Optional[Sequence[str]] = None):
         help=(
             "Variant spec. Use 'name=config' or 'name=config:checkpoint'. "
             "Repeat for multiple variants. Defaults to "
-            "main/cached_dual_stream/open_only."
+            "robot_only_baseline/mixed_main; optional open_pretrain and "
+            "robot_finetune stages must be requested explicitly."
         ),
     )
     parser.add_argument(

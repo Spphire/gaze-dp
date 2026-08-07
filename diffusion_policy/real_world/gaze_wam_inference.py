@@ -283,6 +283,11 @@ class GazeWamInferenceAdapter:
         cfg_scale: Optional[float] = None,
         use_gaze_condition: Optional[bool] = None,
     ) -> Dict[str, np.ndarray]:
+        validated_cfg_scale = (
+            self.cfg_scale
+            if cfg_scale is None
+            else self.policy._validate_nonnegative_float("cfg_scale", cfg_scale)
+        )
         if image is not None:
             self.push_image(image)
         if action_base_abs is None and tcp_pose is not None:
@@ -295,11 +300,7 @@ class GazeWamInferenceAdapter:
         )
         result = self.policy.predict_action(
             obs,
-            cfg_scale=(
-                self.cfg_scale
-                if cfg_scale is None
-                else self.policy._validate_nonnegative_float("cfg_scale", cfg_scale)
-            ),
+            cfg_scale=validated_cfg_scale,
         )
         return {
             key: value.detach().cpu().numpy()

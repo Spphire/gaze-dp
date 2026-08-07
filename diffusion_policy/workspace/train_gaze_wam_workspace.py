@@ -9,6 +9,7 @@ if __name__ == "__main__":
 
 import copy
 import json
+import math
 import os
 import pathlib
 import pickle
@@ -24,7 +25,6 @@ import zarr
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs
 from omegaconf import OmegaConf, open_dict
-from torch.utils.data import DataLoader
 
 from diffusion_policy.common.checkpoint_util import TopKCheckpointManager
 from diffusion_policy.common.omegaconf_resolvers import register_safe_omegaconf_resolvers
@@ -39,6 +39,8 @@ from diffusion_policy.common.gaze_wam_training_config import (
     _parse_dataloader_runtime_config,
     gaze_wam_action_normalizer_contract,
     gaze_wam_data_stream_contract,
+    gaze_wam_prepared_dataloader_batches,
+    gaze_wam_planned_optimizer_steps,
     gaze_wam_loss_routing_validation_guardrails_ok,
     normalize_gaze_wam_bool_field,
     normalize_gaze_wam_nonnegative_float_field,
@@ -49,11 +51,17 @@ from diffusion_policy.common.gaze_wam_training_config import (
     normalize_gaze_wam_unit_interval_float_field,
     validate_gaze_wam_training_config,
     validate_gaze_wam_task_routing_config,
+    resolve_gaze_wam_batching_config,
 )
 from diffusion_policy.common.json_logger import JsonLogger
 from diffusion_policy.common.normalize_util import get_image_identity_normalizer
 from diffusion_policy.common.pytorch_util import dict_apply
 from diffusion_policy.dataset.gaze_wam_mixing import build_gaze_wam_mixed_batch
+from diffusion_policy.dataset.gaze_wam_batching import build_gaze_wam_dataloader
+from diffusion_policy.common.gaze_wam_transfer import (
+    export_gaze_wam_transfer_artifact,
+    load_gaze_wam_transfer_artifact,
+)
 from diffusion_policy.model.common.normalizer import (
     LinearNormalizer,
     SingleFieldLinearNormalizer,
@@ -86,6 +94,77 @@ def _ensure_optimizer_initial_lr_for_resume(optimizer, base_lr, obs_encoder_lr):
             group["initial_lr"] = obs_encoder_lr
         else:
             group["initial_lr"] = base_lr
+
+
+def _planned_prepared_epoch_batches(dataloader, accelerator) -> int:
+    """Return the exact per-rank length expected after ``accelerator.prepare``."""
+    raw_batches = int(len(dataloader))
+    num_processes = int(getattr(accelerator, "num_processes", 1) or 1)
+    split_batches = bool(getattr(accelerator, "split_batches", False))
+    even_batches = bool(getattr(accelerator, "even_batches", True))
+    process_index = int(getattr(accelerator, "process_index", 0) or 0)
+    drop_last = bool(
+        getattr(
+            dataloader,
+            "drop_last",
+            getattr(getattr(dataloader, "batch_sampler", None), "drop_last", False),
+        )
+    )
+    if (
+        num_processes > 1
+        and not split_batches
+        and not even_batches
+        and raw_batches % num_processes != 0
+    ):
+        raise ValueError(
+            "Gaze-WAM requires equal per-rank epoch lengths for global step "
+            "accounting; set Accelerate even_batches=true or use a dataloader "
+            "whose batch count is divisible by num_processes."
+        )
+    return gaze_wam_prepared_dataloader_batches(
+        raw_batches,
+        num_processes=num_processes,
+        split_batches=split_batches,
+        even_batches=even_batches,
+        drop_last=drop_last,
+        process_index=process_index,
+    )
+
+
+def _validate_prepared_epoch_driver_length(
+    planned_batches: int,
+    actual_batches: int,
+) -> int:
+    """Fail fast when Accelerate changes the epoch clock after preparation."""
+    planned_batches = int(planned_batches)
+    actual_batches = int(actual_batches)
+    if actual_batches != planned_batches:
+        raise RuntimeError(
+            "Accelerate prepared epoch length disagrees with the scheduler plan: "
+            f"planned={planned_batches}, actual={actual_batches}."
+        )
+    return actual_batches
+
+
+def _validate_gaze_wam_accumulation_flush_contract(accelerator) -> bool:
+    """Require Accelerate to flush a partial accumulation window per epoch."""
+    gradient_state = getattr(accelerator, "gradient_state", None)
+    sync_with_dataloader = getattr(gradient_state, "sync_with_dataloader", None)
+    if sync_with_dataloader is not True:
+        raise RuntimeError(
+            "Gaze-WAM requires Accelerate sync_with_dataloader=true so the final "
+            "partial gradient-accumulation window is applied at each epoch boundary."
+        )
+    return True
+
+
+def _gaze_wam_checkpoint_due(
+    epoch: int,
+    checkpoint_every: int,
+    stop_after_epoch: bool,
+) -> bool:
+    """Always retain the terminal epoch when a global step budget stops a run."""
+    return bool(stop_after_epoch) or int(epoch) % int(checkpoint_every) == 0
 
 
 def _new_train_window_log_accumulator():
@@ -616,6 +695,10 @@ def _build_training_contract_summary(
     dataloader_lengths=None,
     policy=None,
     accelerator=None,
+    transfer_load_summary=None,
+    planned_optimizer_steps=None,
+    epoch_driver_batches=None,
+    prepared_epoch_batches=None,
 ):
     training_config = validate_gaze_wam_training_config(cfg)
     task_routing_config = validate_gaze_wam_task_routing_config(cfg)
@@ -691,6 +774,7 @@ def _build_training_contract_summary(
         open_dataset_class=_cfg_get_str(cfg.task.open_dataset, "_target_"),
         robot_batch_size=robot_batch_size,
         open_batch_size=open_batch_size,
+        batching_config=training_config["batching"],
     )
     heatmap_num_tokens = normalize_gaze_wam_positive_int_field(
         "task.heatmap_num_tokens",
@@ -899,27 +983,27 @@ def _build_training_contract_summary(
         open_sampling[key] == task_sampling[key] for key in sampling_compare_keys
     )
 
-    source_ratio_matches_mode = (
-        total_batch_size > 0
-        and (
-            (
-                use_robot_data
-                and use_open_data
-                and _close_fraction(robot_ratio, 0.75)
-                and _close_fraction(open_ratio, 0.25)
-            )
-            or (
-                use_robot_data
-                and not use_open_data
-                and _close_fraction(robot_ratio, 1.0)
-                and _close_fraction(open_ratio, 0.0)
-            )
-            or (
-                not use_robot_data
-                and use_open_data
-                and _close_fraction(robot_ratio, 0.0)
-                and _close_fraction(open_ratio, 1.0)
-            )
+    requested_robot_ratio = training_config["batching"].get("requested_robot_ratio")
+    requested_open_ratio = training_config["batching"].get("requested_open_ratio")
+    requested_total = training_config["batching"].get(
+        "requested_total_batch_size_per_process"
+    )
+    expected_robot_batch = None
+    expected_open_batch = None
+    if (
+        requested_total is not None
+        and requested_robot_ratio is not None
+        and requested_open_ratio is not None
+    ):
+        expected_robot_batch = int(
+            math.floor(float(requested_total) * float(requested_robot_ratio) + 0.5)
+        )
+        expected_open_batch = int(requested_total) - expected_robot_batch
+    resolved_quota_matches_request = (
+        expected_robot_batch is None
+        or (
+            robot_batch_size == expected_robot_batch
+            and open_batch_size == expected_open_batch
         )
     )
     action_loss_weight_matches_active_sources = (
@@ -974,14 +1058,10 @@ def _build_training_contract_summary(
             or open_train_batches is None
             or open_train_batches > 0
         ),
-        "source_ratio_matches_mode": source_ratio_matches_mode,
-        "source_ratio_75_25_when_mixed": (
-            not (use_robot_data and use_open_data)
-            or (
-                _close_fraction(robot_ratio, 0.75)
-                and _close_fraction(open_ratio, 0.25)
-            )
-        ),
+        "source_ratio_matches_configured_quota": resolved_quota_matches_request,
+        # Kept as a compatibility key for old reports.  It now means that the
+        # resolved source quotas match the active configuration, not 75/25.
+        "source_ratio_75_25_when_mixed": resolved_quota_matches_request,
         "source_ratio_open_only_when_robot_disabled": (
             use_robot_data
             or not use_open_data
@@ -1050,7 +1130,11 @@ def _build_training_contract_summary(
             and data_stream_contract["mixing"]["mode"]
             == "online_per_step_concat_after_fetch"
             and data_stream_contract["mixing"]["ratio_source"]
-            == "robot_dataloader.batch_size/open_dataloader.batch_size"
+            in (
+                "robot_dataloader.batch_size/open_dataloader.batch_size",
+                "data_mixing.total_batch_size_per_process+"
+                "data_mixing.robot_ratio+data_mixing.open_ratio",
+            )
         ),
         "heatmap_token_grid_16x16": heatmap_token_grid == [16, 16],
         "heatmap_num_tokens_256": heatmap_num_tokens == 256,
@@ -1279,6 +1363,41 @@ def _build_training_contract_summary(
             },
         },
         "batching": {
+            "requested_batch_size_source": str(
+                training_config["batching"].get("batch_size_source", "auto")
+            ),
+            "resolved_batch_size_source": str(
+                training_config["batching"].get(
+                    "resolved_batch_size_source", "dataloader"
+                )
+            ),
+            "compatibility_fallback_to_dataloader": bool(
+                training_config["batching"].get(
+                    "compatibility_fallback_to_dataloader", False
+                )
+            ),
+            "ratio_fields_present": bool(
+                training_config["batching"].get("ratio_fields_present", False)
+            ),
+            "requested_total_batch_size_per_process": training_config[
+                "batching"
+            ].get("requested_total_batch_size_per_process"),
+            "requested_robot_ratio": training_config["batching"].get(
+                "requested_robot_ratio"
+            ),
+            "requested_open_ratio": training_config["batching"].get(
+                "requested_open_ratio"
+            ),
+            "configured_robot_dataloader_batch_size": int(
+                training_config["batching"].get(
+                    "configured_robot_dataloader_batch_size", robot_batch_size
+                )
+            ),
+            "configured_open_dataloader_batch_size": int(
+                training_config["batching"].get(
+                    "configured_open_dataloader_batch_size", open_batch_size
+                )
+            ),
             "robot_batch_size_per_process": robot_batch_size,
             "open_batch_size_per_process": open_batch_size,
             "train_batch_size_per_process": total_batch_size,
@@ -1328,6 +1447,61 @@ def _build_training_contract_summary(
         },
         "training_config": training_config,
         "task_routing_config": task_routing_config,
+        "schedule": {
+            "stage": training_config["stage"],
+            "epoch_driver": (
+                "robot_dataloader"
+                if use_robot_data
+                else "open_dataloader"
+                if use_open_data
+                else "none"
+            ),
+            "epoch_definition": (
+                "one pass over the robot train dataloader; open iterator restarts"
+                if use_robot_data
+                else "one pass over the open train dataloader"
+            ),
+            "epoch_driver_batches": (
+                int(epoch_driver_batches)
+                if epoch_driver_batches is not None
+                else None
+            ),
+            "prepared_epoch_batches_per_process": (
+                int(prepared_epoch_batches)
+                if prepared_epoch_batches is not None
+                else None
+            ),
+            "gradient_accumulate_every": gradient_accumulate_every,
+            "gradient_accumulation_flush": "accelerate_sync_with_dataloader",
+            "planned_optimizer_steps": (
+                int(planned_optimizer_steps)
+                if planned_optimizer_steps is not None
+                else None
+            ),
+            "max_train_steps_scope": "global_optimizer_steps",
+            "max_train_steps": training_config["max_train_steps"],
+            "validation_primary_source": (
+                "robot"
+                if use_robot_data
+                else "open"
+                if use_open_data
+                else "none"
+            ),
+            "open_pretrain_is_optional_stage": True,
+        },
+        "transfer": {
+            "load": dict(transfer_load_summary or {}),
+            "configured_export_path": training_config["transfer"][
+                "export_path"
+            ],
+            "configured_export_scope": training_config["transfer"][
+                "export_scope"
+            ],
+            "export_overwrite": training_config["transfer"][
+                "export_overwrite"
+            ],
+            "export": None,
+        },
         "routing": routing_contract,
         "loss": {
             "action_loss_weight": action_loss_weight,
@@ -1436,6 +1610,33 @@ def _write_training_contract_summary(summary, output_dir: str) -> str:
 def _stamp_training_scale_into_cfg(cfg, training_contract):
     """Persist launcher/contract training-scale evidence into checkpoint cfg."""
     batching = training_contract.get("batching", {})
+    if "data_mixing" in cfg:
+        with open_dict(cfg.data_mixing):
+            cfg.data_mixing.requested_batch_size_source = str(
+                batching.get("requested_batch_size_source", "auto")
+            )
+            cfg.data_mixing.resolved_batch_size_source = str(
+                batching.get("resolved_batch_size_source", "dataloader")
+            )
+            cfg.data_mixing.compatibility_fallback_to_dataloader = bool(
+                batching.get("compatibility_fallback_to_dataloader", False)
+            )
+            requested_total = batching.get(
+                "requested_total_batch_size_per_process", None
+            )
+            cfg.data_mixing.requested_total_batch_size_per_process = (
+                None if requested_total is None else int(requested_total)
+            )
+            requested_robot_ratio = batching.get("requested_robot_ratio", None)
+            cfg.data_mixing.requested_robot_ratio = (
+                None
+                if requested_robot_ratio is None
+                else float(requested_robot_ratio)
+            )
+            requested_open_ratio = batching.get("requested_open_ratio", None)
+            cfg.data_mixing.requested_open_ratio = (
+                None if requested_open_ratio is None else float(requested_open_ratio)
+            )
     with open_dict(cfg.training):
         cfg.training.robot_batch_size_per_process = int(
             batching.get("robot_batch_size_per_process", 0)
@@ -1858,6 +2059,18 @@ class TrainGazeWamWorkspace(BaseWorkspace):
 
     def run(self):
         cfg = copy.deepcopy(self.cfg)
+        # Apply debug limits before validation, scheduler construction, and the
+        # persisted training contract so smoke runs report their real budget.
+        if cfg.training.debug:
+            if cfg.training.num_epochs is None or cfg.training.num_epochs > 2:
+                cfg.training.num_epochs = 2
+            if cfg.training.max_train_steps is None or cfg.training.max_train_steps > 3:
+                cfg.training.max_train_steps = 3
+            cfg.training.checkpoint_every = 1
+            cfg.training.sample_every = 1
+            cfg.training.val_every = 1
+            if cfg.training.max_val_steps is None or cfg.training.max_val_steps > 2:
+                cfg.training.max_val_steps = 2
         training_config = validate_gaze_wam_training_config(cfg)
         task_routing_config = validate_gaze_wam_task_routing_config(cfg)
         if not training_config["valid"] or not task_routing_config["valid"]:
@@ -1871,6 +2084,26 @@ class TrainGazeWamWorkspace(BaseWorkspace):
         cfg = _normalize_gaze_wam_training_config(cfg, training_config)
         cfg = _normalize_gaze_wam_task_routing_config(cfg, task_routing_config)
 
+        transfer_load_summary = None
+        transfer_load_path = str(training_config["transfer"]["load_path"] or "")
+        if transfer_load_path:
+            transfer_load_summary = load_gaze_wam_transfer_artifact(
+                self.model,
+                hydra.utils.to_absolute_path(transfer_load_path),
+                scope=training_config["transfer"]["load_scope"],
+            )
+            if self.ema_model is not None:
+                load_gaze_wam_transfer_artifact(
+                    self.ema_model,
+                    hydra.utils.to_absolute_path(transfer_load_path),
+                    scope=training_config["transfer"]["load_scope"],
+                )
+            print(
+                "Loaded Gaze-WAM transfer artifact: "
+                f"{transfer_load_summary['path']} "
+                f"scope={transfer_load_summary['scope']}"
+            )
+
         accelerator = Accelerator(
             log_with="wandb",
             gradient_accumulation_steps=cfg.training.gradient_accumulate_every,
@@ -1878,6 +2111,7 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                 DistributedDataParallelKwargs(find_unused_parameters=True),
             ],
         )
+        _validate_gaze_wam_accumulation_flush_contract(accelerator)
         require_amp = bool(cfg.training.get("require_amp", True))
         mixed_precision = str(getattr(accelerator, "mixed_precision", "no") or "no")
         if require_amp and mixed_precision not in ("bf16", "fp16"):
@@ -1928,7 +2162,15 @@ class TrainGazeWamWorkspace(BaseWorkspace):
             open_val_dataset = open_dataset.get_validation_dataset()
             use_open_val_data = open_val_batch_size > 0 and len(open_val_dataset) > 0
             if use_open_val_data:
-                open_val_dataloader = DataLoader(open_val_dataset, **cfg.val_open_dataloader)
+                open_val_dataloader = build_gaze_wam_dataloader(
+                    open_val_dataset,
+                    cfg.val_open_dataloader,
+                    batch_size=open_val_batch_size,
+                    tail_policy=training_config["batching"][
+                        "validation_tail_policy"
+                    ],
+                    source_name="open_val",
+                )
         use_robot_val_data = (
             use_robot_data
             and val_robot_batch_size > 0
@@ -1944,11 +2186,31 @@ class TrainGazeWamWorkspace(BaseWorkspace):
             open_batch_size=open_batch_size,
         )
         if use_robot_data:
-            robot_dataloader = DataLoader(robot_dataset, **cfg.robot_dataloader)
+            robot_dataloader = build_gaze_wam_dataloader(
+                robot_dataset,
+                cfg.robot_dataloader,
+                batch_size=robot_batch_size,
+                tail_policy=training_config["batching"]["robot_tail_policy"],
+                source_name="robot_train",
+            )
         if use_robot_val_data:
-            robot_val_dataloader = DataLoader(robot_val_dataset, **cfg.val_robot_dataloader)
+            robot_val_dataloader = build_gaze_wam_dataloader(
+                robot_val_dataset,
+                cfg.val_robot_dataloader,
+                batch_size=val_robot_batch_size,
+                tail_policy=training_config["batching"][
+                    "validation_tail_policy"
+                ],
+                source_name="robot_val",
+            )
         if use_open_data:
-            open_dataloader = DataLoader(open_dataset, **cfg.open_dataloader)
+            open_dataloader = build_gaze_wam_dataloader(
+                open_dataset,
+                cfg.open_dataloader,
+                batch_size=open_batch_size,
+                tail_policy=training_config["batching"]["open_tail_policy"],
+                source_name="open_train",
+            )
         dataloader_lengths = _check_training_dataloader_lengths(
             robot_dataloader=robot_dataloader,
             robot_val_dataloader=robot_val_dataloader,
@@ -1967,6 +2229,35 @@ class TrainGazeWamWorkspace(BaseWorkspace):
             dataloader_lengths["open_val_batches"] = 0
 
         os.makedirs(self.output_dir, exist_ok=True)
+        epoch_driver_batches = (
+            dataloader_lengths["robot_train_batches"]
+            if use_robot_data
+            else dataloader_lengths["open_train_batches"]
+        )
+        scheduler_step_multiplier = (
+            int(accelerator.num_processes)
+            if not bool(accelerator.split_batches)
+            else 1
+        )
+        train_dataloader_for_planning = (
+            robot_dataloader if use_robot_data else open_dataloader
+        )
+        if train_dataloader_for_planning is None:
+            raise ValueError("The selected Gaze-WAM epoch driver dataloader is missing.")
+        prepared_epoch_batches = _planned_prepared_epoch_batches(
+            train_dataloader_for_planning,
+            accelerator,
+        )
+        if prepared_epoch_batches <= 0:
+            raise ValueError(
+                "The selected Gaze-WAM epoch driver dataloader has no prepared batches."
+            )
+        planned_optimizer_steps = gaze_wam_planned_optimizer_steps(
+            steps_per_epoch=prepared_epoch_batches,
+            num_epochs=cfg.training.num_epochs,
+            gradient_accumulate_every=cfg.training.gradient_accumulate_every,
+            max_train_steps=cfg.training.max_train_steps,
+        )
         training_contract = _build_training_contract_summary(
             cfg=cfg,
             robot_dataset=robot_dataset,
@@ -1976,6 +2267,10 @@ class TrainGazeWamWorkspace(BaseWorkspace):
             dataloader_lengths=dataloader_lengths,
             policy=self.model,
             accelerator=accelerator,
+            transfer_load_summary=transfer_load_summary,
+            planned_optimizer_steps=planned_optimizer_steps,
+            epoch_driver_batches=epoch_driver_batches,
+            prepared_epoch_batches=prepared_epoch_batches,
         )
         training_contract_path = str(pathlib.Path(self.output_dir) / "training_contract.json")
         if accelerator.is_main_process:
@@ -2004,6 +2299,19 @@ class TrainGazeWamWorkspace(BaseWorkspace):
             ),
             "training_contract_robot_heatmap_on_gaze_dropout": int(
                 training_contract["routing"]["robot_heatmap_on_gaze_dropout"]
+            ),
+            "training_contract_stage": str(
+                training_contract["schedule"]["stage"]
+            ),
+            "training_contract_epoch_driver": str(
+                training_contract["schedule"]["epoch_driver"]
+            ),
+            "training_contract_max_train_steps": int(
+                training_contract["schedule"]["max_train_steps"]
+                or 0
+            ),
+            "training_contract_prepared_epoch_batches": int(
+                prepared_epoch_batches
             ),
         }
         training_contract_log_pending = True
@@ -2040,7 +2348,6 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                 "No train dataloader was constructed. Enable robot_dataloader.batch_size "
                 "or open_dataloader.batch_size before policy training."
             )
-        steps_per_epoch = len(train_epoch_dataloader)
         if cfg.training.resume and self.global_step > 0:
             _ensure_optimizer_initial_lr_for_resume(
                 self.optimizer,
@@ -2050,14 +2357,15 @@ class TrainGazeWamWorkspace(BaseWorkspace):
         lr_scheduler = get_scheduler(
             cfg.training.lr_scheduler,
             optimizer=self.optimizer,
-            num_warmup_steps=cfg.training.lr_warmup_steps,
-            num_training_steps=int(
-                np.ceil(
-                    (steps_per_epoch * cfg.training.num_epochs)
-                    / cfg.training.gradient_accumulate_every
-                )
+            num_warmup_steps=int(cfg.training.lr_warmup_steps)
+            * (
+                scheduler_step_multiplier
             ),
-            last_epoch=self.global_step - 1,
+            num_training_steps=int(planned_optimizer_steps)
+            * (
+                scheduler_step_multiplier
+            ),
+            last_epoch=self.global_step * scheduler_step_multiplier - 1,
         )
 
         ema: EMAModel = None
@@ -2097,25 +2405,44 @@ class TrainGazeWamWorkspace(BaseWorkspace):
         self.optimizer = prepared["optimizer"]
         lr_scheduler = prepared["lr_scheduler"]
         train_epoch_dataloader = robot_dataloader if use_robot_data else open_dataloader
+        if train_epoch_dataloader is None:
+            raise ValueError(
+                "Accelerate.prepare returned no epoch-driver dataloader."
+            )
+        actual_prepared_epoch_batches = _validate_prepared_epoch_driver_length(
+            planned_batches=prepared_epoch_batches,
+            actual_batches=len(train_epoch_dataloader),
+        )
+        training_contract["schedule"][
+            "actual_prepared_epoch_batches_per_process"
+        ] = actual_prepared_epoch_batches
+        training_contract_log_fields[
+            "training_contract_actual_prepared_epoch_batches"
+        ] = actual_prepared_epoch_batches
+        if accelerator.is_main_process:
+            _write_training_contract_summary(training_contract, self.output_dir)
         device = accelerator.device
         if self.ema_model is not None:
             self.ema_model.to(device)
 
-        if cfg.training.debug:
-            if cfg.training.num_epochs is None or cfg.training.num_epochs > 2:
-                cfg.training.num_epochs = 2
-            if cfg.training.max_train_steps is None or cfg.training.max_train_steps > 3:
-                cfg.training.max_train_steps = 3
-            cfg.training.checkpoint_every = 1
-            cfg.training.sample_every = 1
-            cfg.training.val_every = 1
-            if cfg.training.max_val_steps is None or cfg.training.max_val_steps > 2:
-                cfg.training.max_val_steps = 2
+        already_at_max_train_steps = (
+            cfg.training.max_train_steps is not None
+            and self.global_step >= cfg.training.max_train_steps
+        )
+        if already_at_max_train_steps:
+            print(
+                "Global training step budget already reached: "
+                f"global_step={self.global_step}, "
+                f"max_train_steps={cfg.training.max_train_steps}."
+            )
 
         log_path = os.path.join(self.output_dir, "logs.json.txt")
         json_logger_cls = JsonLogger if accelerator.is_main_process else _NullJsonLogger
         with json_logger_cls(log_path) as json_logger:
-            while self.epoch < cfg.training.num_epochs:
+            while (
+                not already_at_max_train_steps
+                and self.epoch < cfg.training.num_epochs
+            ):
                 self.model.train()
                 if cfg.training.freeze_encoder:
                     policy_module = accelerator.unwrap_model(self.model)
@@ -2124,7 +2451,7 @@ class TrainGazeWamWorkspace(BaseWorkspace):
 
                 step_log = {}
                 step_log_has_optimizer_step = False
-                optimizer_steps_this_epoch = 0
+                stop_after_epoch = False
                 train_window_log = _new_train_window_log_accumulator()
                 open_iter = (
                     _RestartingDataLoaderIterator(open_dataloader, "open train")
@@ -2258,11 +2585,12 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                         is_last_batch = batch_idx == (len(train_epoch_dataloader) - 1)
                         reached_max_train_steps = False
                         if optimizer_step_completed:
-                            optimizer_steps_this_epoch += 1
                             reached_max_train_steps = (
                                 cfg.training.max_train_steps is not None
-                                and optimizer_steps_this_epoch >= cfg.training.max_train_steps
+                                and self.global_step + 1
+                                >= cfg.training.max_train_steps
                             )
+                            stop_after_epoch = reached_max_train_steps
                             step_log = current_step_log
                             step_log_has_optimizer_step = True
                             train_window_log = _new_train_window_log_accumulator()
@@ -2313,6 +2641,11 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                         "robot_action_mask_count": 0.0,
                         "robot_heatmap_loss_sum": 0.0,
                         "robot_heatmap_mask_count": 0.0,
+                        "robot_heatmap_xy_loss_sum": 0.0,
+                        "robot_heatmap_xy_mask_count": 0.0,
+                        "robot_heatmap_point_nll_loss_sum": 0.0,
+                        "robot_heatmap_js_loss_sum": 0.0,
+                        "robot_heatmap_token_kl_loss_sum": 0.0,
                         "open_heatmap_loss_sum": 0.0,
                         "open_heatmap_mask_count": 0.0,
                     }
@@ -2401,6 +2734,9 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                                 gather_is_robot = 1.0 - gather_is_open
                                 gather_robot_action_mask = gather_action_mask * gather_is_robot
                                 gather_robot_heatmap_mask = gather_heatmap_mask * gather_is_robot
+                                gather_robot_heatmap_xy_mask = (
+                                    gather_heatmap_xy_mask * gather_is_robot
+                                )
                                 gather_open_heatmap_mask = gather_heatmap_mask * gather_is_open
                                 val_metrics["action_loss_sum"] += float(
                                     (gather_action_loss * gather_action_mask).sum().item()
@@ -2449,6 +2785,33 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                                 )
                                 val_metrics["robot_heatmap_mask_count"] += float(
                                     gather_robot_heatmap_mask.sum().item()
+                                )
+                                val_metrics["robot_heatmap_xy_loss_sum"] += float(
+                                    (
+                                        gather_heatmap_xy_loss
+                                        * gather_robot_heatmap_xy_mask
+                                    ).sum().item()
+                                )
+                                val_metrics["robot_heatmap_xy_mask_count"] += float(
+                                    gather_robot_heatmap_xy_mask.sum().item()
+                                )
+                                val_metrics["robot_heatmap_point_nll_loss_sum"] += float(
+                                    (
+                                        gather_heatmap_point_nll_loss
+                                        * gather_robot_heatmap_xy_mask
+                                    ).sum().item()
+                                )
+                                val_metrics["robot_heatmap_js_loss_sum"] += float(
+                                    (
+                                        gather_heatmap_js_loss
+                                        * gather_robot_heatmap_mask
+                                    ).sum().item()
+                                )
+                                val_metrics["robot_heatmap_token_kl_loss_sum"] += float(
+                                    (
+                                        gather_heatmap_token_kl_loss
+                                        * gather_robot_heatmap_mask
+                                    ).sum().item()
                                 )
                                 val_metrics["open_heatmap_loss_sum"] += float(
                                     (gather_heatmap_loss * gather_open_heatmap_mask).sum().item()
@@ -2567,6 +2930,94 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                             val_metrics["robot_heatmap_loss_sum"]
                             / val_metrics["robot_heatmap_mask_count"]
                         )
+                    if (
+                        val_metrics["robot_action_mask_count"] > 0
+                        or val_metrics["robot_heatmap_mask_count"] > 0
+                    ):
+                        policy_module = accelerator.unwrap_model(self.model)
+
+                        def _metric_mean(sum_key, count_key):
+                            count = val_metrics[count_key]
+                            if count <= 0:
+                                return None
+                            return val_metrics[sum_key] / count
+
+                        robot_action_loss = _metric_mean(
+                            "robot_action_loss_sum",
+                            "robot_action_mask_count",
+                        )
+                        robot_heatmap_loss = _metric_mean(
+                            "robot_heatmap_loss_sum",
+                            "robot_heatmap_mask_count",
+                        )
+                        robot_heatmap_xy_loss = _metric_mean(
+                            "robot_heatmap_xy_loss_sum",
+                            "robot_heatmap_xy_mask_count",
+                        )
+                        robot_heatmap_point_nll_loss = _metric_mean(
+                            "robot_heatmap_point_nll_loss_sum",
+                            "robot_heatmap_xy_mask_count",
+                        )
+                        robot_heatmap_js_loss = _metric_mean(
+                            "robot_heatmap_js_loss_sum",
+                            "robot_heatmap_mask_count",
+                        )
+                        robot_heatmap_token_kl_loss = _metric_mean(
+                            "robot_heatmap_token_kl_loss_sum",
+                            "robot_heatmap_mask_count",
+                        )
+                        robot_loss = 0.0
+                        if robot_action_loss is not None:
+                            robot_loss += (
+                                float(policy_module.action_loss_weight)
+                                * robot_action_loss
+                            )
+                        if robot_heatmap_loss is not None:
+                            robot_loss += (
+                                float(policy_module.heatmap_loss_weight)
+                                * robot_heatmap_loss
+                            )
+                        if robot_heatmap_token_kl_loss is not None:
+                            robot_loss += (
+                                float(policy_module.heatmap_token_kl_loss_weight)
+                                * robot_heatmap_token_kl_loss
+                            )
+                        if getattr(
+                            policy_module,
+                            "heatmap_diffusion_final_loss_enabled",
+                            False,
+                        ):
+                            if robot_heatmap_xy_loss is not None:
+                                robot_loss += (
+                                    float(policy_module.heatmap_xy_loss_weight)
+                                    * robot_heatmap_xy_loss
+                                )
+                            if robot_heatmap_point_nll_loss is not None:
+                                robot_loss += (
+                                    float(policy_module.heatmap_point_nll_loss_weight)
+                                    * robot_heatmap_point_nll_loss
+                                )
+                            if robot_heatmap_js_loss is not None:
+                                robot_loss += (
+                                    float(policy_module.heatmap_js_loss_weight)
+                                    * robot_heatmap_js_loss
+                                )
+                        step_log["val_robot_loss"] = robot_loss
+                        step_log["val_robot_heatmap_xy_loss"] = (
+                            robot_heatmap_xy_loss
+                            if robot_heatmap_xy_loss is not None
+                            else 0.0
+                        )
+                        step_log["val_robot_heatmap_js_loss"] = (
+                            robot_heatmap_js_loss
+                            if robot_heatmap_js_loss is not None
+                            else 0.0
+                        )
+                        step_log["val_robot_heatmap_token_kl_loss"] = (
+                            robot_heatmap_token_kl_loss
+                            if robot_heatmap_token_kl_loss is not None
+                            else 0.0
+                        )
                     if val_metrics["open_heatmap_mask_count"] > 0:
                         step_log["val_open_heatmap_loss"] = (
                             val_metrics["open_heatmap_loss_sum"]
@@ -2594,7 +3045,11 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                     self.model.train()
 
                 should_save_checkpoint = (
-                    self.epoch % cfg.training.checkpoint_every == 0
+                    _gaze_wam_checkpoint_due(
+                        epoch=self.epoch,
+                        checkpoint_every=cfg.training.checkpoint_every,
+                        stop_after_epoch=stop_after_epoch,
+                    )
                     and accelerator.is_main_process
                 )
                 metric_dict = {}
@@ -2624,6 +3079,41 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                     if topk_ckpt_path is not None:
                         self.save_checkpoint(path=topk_ckpt_path)
                     self.model = model_ddp
+
+                if stop_after_epoch:
+                    break
+
+        transfer_export_path = str(
+            training_config["transfer"]["export_path"] or ""
+        )
+        if transfer_export_path:
+            accelerator.wait_for_everyone()
+            if accelerator.is_main_process:
+                transfer_export_summary = export_gaze_wam_transfer_artifact(
+                    accelerator.unwrap_model(self.model),
+                    hydra.utils.to_absolute_path(transfer_export_path),
+                    scope=training_config["transfer"]["export_scope"],
+                    overwrite=bool(
+                        training_config["transfer"]["export_overwrite"]
+                    ),
+                    metadata={
+                        "training_stage": training_config["stage"],
+                        "global_optimizer_steps": int(self.global_step),
+                        "robot_ratio": float(
+                            training_config["batching"]["robot_ratio"]
+                        ),
+                        "open_ratio": float(
+                            training_config["batching"]["open_ratio"]
+                        ),
+                    },
+                )
+                training_contract["transfer"]["export"] = transfer_export_summary
+                _write_training_contract_summary(training_contract, self.output_dir)
+                print(
+                    "Exported Gaze-WAM transfer artifact: "
+                    f"{transfer_export_summary['path']} "
+                    f"scope={transfer_export_summary['scope']}"
+                )
 
         accelerator.end_training()
 

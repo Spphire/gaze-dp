@@ -15,14 +15,13 @@ from diffusion_policy.scripts.gaze_wam_provenance import add_provenance_contract
 
 
 DEFAULT_FULL_VARIANTS = (
-    ("main", "train_gaze_wam_workspace"),
-    ("cached_dual_stream", "train_gaze_wam_cached_dual_stream_workspace"),
-    ("open_only", "train_gaze_wam_open_only_workspace"),
+    ("robot_only_baseline", "train_gaze_wam_robot_only_workspace"),
+    ("mixed_main", "train_gaze_wam_workspace"),
 )
 
 DEFAULT_DEBUG_VARIANTS = (
-    ("main_debug", "train_gaze_wam_debug_workspace"),
-    ("open_only_debug", "train_gaze_wam_open_only_debug_workspace"),
+    ("robot_only_debug", "train_gaze_wam_robot_only_debug_workspace"),
+    ("mixed_debug", "train_gaze_wam_debug_workspace"),
 )
 
 GAZE_DROPOUT_SWEEP = (0.0, 0.1, 0.2, 0.3)
@@ -59,6 +58,12 @@ JOB_PROVENANCE_FIELDS = [
     "open_batch_size",
     "robot_ratio",
     "open_ratio",
+    "training_stage",
+    "batch_size_source",
+    "requested_batch_size_source",
+    "total_batch_size_per_process",
+    "requested_robot_ratio",
+    "requested_open_ratio",
     "gradient_accumulate_every",
     "num_processes",
     "mixed_precision",
@@ -132,7 +137,12 @@ def _default_variants(debug: bool) -> List[Dict[str, object]]:
 
 
 def _sweep_variants(sweep: str, debug: bool) -> List[Dict[str, object]]:
-    config = "train_gaze_wam_debug_workspace" if debug else "train_gaze_wam_workspace"
+    mixed_config = "train_gaze_wam_debug_workspace" if debug else "train_gaze_wam_workspace"
+    robot_only_config = (
+        "train_gaze_wam_robot_only_debug_workspace"
+        if debug
+        else "train_gaze_wam_robot_only_workspace"
+    )
     suffix = "_debug" if debug else ""
     variants: List[Dict[str, object]] = []
     if sweep == "gaze_dropout":
@@ -141,18 +151,30 @@ def _sweep_variants(sweep: str, debug: bool) -> List[Dict[str, object]]:
             _add_variant(
                 variants,
                 name=f"gaze_dropout_{token}{suffix}",
-                config=config,
+                config=mixed_config,
                 overrides=[f"task.robot_gaze_dropout_prob={prob}"],
             )
         return variants
     if sweep == "open_ratio":
         ratio_rows = OPEN_RATIO_SWEEP_DEBUG if debug else OPEN_RATIO_SWEEP_FULL
         for token, robot_batch, open_batch in ratio_rows:
+            ratio_total = 64 if not debug else robot_batch + open_batch
+            config = robot_only_config if open_batch == 0 else mixed_config
             _add_variant(
                 variants,
                 name=f"open_ratio_{token}{suffix}",
                 config=config,
                 overrides=[
+                    "data_mixing.batch_size_source=ratio",
+                    f"data_mixing.total_batch_size_per_process={ratio_total}",
+                    (
+                        "data_mixing.robot_ratio="
+                        + str(float(robot_batch / ratio_total))
+                    ),
+                    (
+                        "data_mixing.open_ratio="
+                        + str(float(open_batch / ratio_total))
+                    ),
                     f"robot_dataloader.batch_size={robot_batch}",
                     f"open_dataloader.batch_size={open_batch}",
                     f"val_robot_dataloader.batch_size={robot_batch}",
@@ -289,6 +311,19 @@ def _config_is_debug(config_name: str, plan_debug: bool) -> bool:
     return plan_debug or "_debug" in config_name
 
 
+def _default_training_stage_for_config(config_name: str) -> str:
+    name = str(config_name).lower()
+    if "open_pretrain" in name:
+        return "open_pretrain"
+    if "robot_finetune" in name:
+        return "robot_finetune"
+    if "robot_only" in name:
+        return "robot_only"
+    if "open_only" in name:
+        return "open_only"
+    return "mixed_train"
+
+
 def _job_provenance(
     config_name: str,
     plan_debug: bool,
@@ -305,13 +340,80 @@ def _job_provenance(
     use_block_attention_mask = True
     heatmap_objective = "dsnt_js"
 
-    if "open_only" in config_name:
+    default_stage = _default_training_stage_for_config(config_name)
+    if default_stage == "open_pretrain":
+        robot_batch = 0
+        open_batch = 4 if is_debug else 64
+        robot_gaze_dropout_prob = 0.0
+        robot_heatmap_on_gaze_dropout = False
+    elif default_stage == "open_only":
         robot_batch = 0
         robot_gaze_dropout_prob = 0.0
         robot_heatmap_on_gaze_dropout = False
+    elif default_stage == "robot_only":
+        robot_batch = 3 if is_debug else 64
+        open_batch = 0
 
-    robot_batch = _override_int(overrides, "robot_dataloader.batch_size", robot_batch)
-    open_batch = _override_int(overrides, "open_dataloader.batch_size", open_batch)
+    canonical_robot_batch = robot_batch
+    canonical_open_batch = open_batch
+    legacy_robot_batch = _override_int(
+        overrides,
+        "robot_dataloader.batch_size",
+        canonical_robot_batch,
+    )
+    legacy_open_batch = _override_int(
+        overrides,
+        "open_dataloader.batch_size",
+        canonical_open_batch,
+    )
+    default_total_batch = canonical_robot_batch + canonical_open_batch
+    default_total_batch = _override_int(
+        overrides,
+        "data_mixing.total_batch_size_per_process",
+        default_total_batch,
+    )
+    canonical_total = canonical_robot_batch + canonical_open_batch
+    default_robot_ratio = (
+        canonical_robot_batch / canonical_total if canonical_total > 0 else 0.0
+    )
+    default_open_ratio = (
+        canonical_open_batch / canonical_total if canonical_total > 0 else 0.0
+    )
+    requested_robot_ratio = _override_float(
+        overrides,
+        "data_mixing.robot_ratio",
+        default_robot_ratio,
+    )
+    requested_open_ratio = _override_float(
+        overrides,
+        "data_mixing.open_ratio",
+        default_open_ratio,
+    )
+    ratio_robot_batch = int(default_total_batch * requested_robot_ratio + 0.5)
+    ratio_open_batch = int(default_total_batch - ratio_robot_batch)
+    config_defaults = _read_simple_yaml_scalars(
+        str(ROOT_DIR / "diffusion_policy" / "config" / f"{config_name}.yaml")
+    )
+    requested_batch_size_source = _override_str(
+        overrides,
+        "data_mixing.batch_size_source",
+        config_defaults.get("batch_size_source", "ratio"),
+    ).strip().lower()
+    if requested_batch_size_source == "ratio":
+        resolved_batch_size_source = "ratio"
+        robot_batch = ratio_robot_batch
+        open_batch = ratio_open_batch
+    elif requested_batch_size_source == "auto" and (
+        ratio_robot_batch == legacy_robot_batch
+        and ratio_open_batch == legacy_open_batch
+    ):
+        resolved_batch_size_source = "ratio"
+        robot_batch = ratio_robot_batch
+        open_batch = ratio_open_batch
+    else:
+        resolved_batch_size_source = "dataloader"
+        robot_batch = legacy_robot_batch
+        open_batch = legacy_open_batch
     gradient_accumulate_every = _override_int(
         overrides,
         "training.gradient_accumulate_every",
@@ -402,11 +504,23 @@ def _job_provenance(
         and (not obs_encoder_cache_dir or obs_encoder_cache_dir_is_dir)
     )
 
+    training_stage = _override_str(
+        overrides,
+        "training.stage",
+        default_stage,
+    )
+
     return add_provenance_contract({
         "robot_batch_size": robot_batch,
         "open_batch_size": open_batch,
         "robot_ratio": float(robot_batch / total_batch) if total_batch > 0 else 0.0,
         "open_ratio": float(open_batch / total_batch) if total_batch > 0 else 0.0,
+        "training_stage": training_stage,
+        "batch_size_source": resolved_batch_size_source,
+        "requested_batch_size_source": requested_batch_size_source,
+        "total_batch_size_per_process": int(total_batch),
+        "requested_robot_ratio": float(requested_robot_ratio),
+        "requested_open_ratio": float(requested_open_ratio),
         **training_scale,
         "robot_gaze_dropout_prob": robot_gaze_dropout_prob,
         "robot_heatmap_on_gaze_dropout": robot_heatmap_on_gaze_dropout,
@@ -553,7 +667,12 @@ def build_gaze_wam_experiment_plan(
 ) -> Dict[str, object]:
     train_overrides = list(train_overrides or [])
     eval_overrides = list(eval_overrides or [])
-    include_sweeps = list(include_sweeps or [])
+    if include_sweeps is None:
+        # A default plan should expose the source-mixture ablation explicitly;
+        # custom variant lists remain single-job unless the caller asks for a sweep.
+        include_sweeps = ["open_ratio"] if variants is None else []
+    else:
+        include_sweeps = list(include_sweeps)
     parsed_variants = _resolve_variants(
         variants=variants,
         debug=debug,

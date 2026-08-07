@@ -1,6 +1,20 @@
 import ast
 import math
 
+from omegaconf import open_dict
+
+
+GAZE_WAM_BATCH_SIZE_SOURCES = ("auto", "ratio", "dataloader")
+GAZE_WAM_TAIL_POLICIES = ("keep", "drop", "pad")
+GAZE_WAM_TRAINING_STAGES = (
+    "mixed_train",
+    "open_only",
+    "open_pretrain",
+    "robot_finetune",
+    "robot_only",
+)
+GAZE_WAM_TRANSFER_SCOPES = ("obs_encoder", "obs_and_gaze")
+
 
 GAZE_WAM_REQUIRED_LOSS_ROUTING_VALIDATION_FLAGS = (
     "open_rows_must_not_have_action",
@@ -80,6 +94,7 @@ def gaze_wam_data_stream_contract(
     open_dataset_class: str,
     robot_batch_size: int,
     open_batch_size: int,
+    batching_config=None,
 ) -> dict:
     """Describe the fixed two-source online mixing contract for review artifacts."""
     robot_batch_size = normalize_gaze_wam_nonnegative_int_field(
@@ -97,6 +112,25 @@ def gaze_wam_data_stream_contract(
     expected_robot_class = "diffusion_policy.dataset.gaze_wam_dataset.GazeWamRobotDataset"
     expected_open_class = "diffusion_policy.dataset.gaze_wam_dataset.GazeWamOpenDataset"
     total_batch_size = robot_batch_size + open_batch_size
+    batching_config = dict(batching_config or {})
+    resolved_batch_size_source = str(
+        batching_config.get("resolved_batch_size_source", "dataloader")
+    )
+    if resolved_batch_size_source == "ratio":
+        ratio_source = (
+            "data_mixing.total_batch_size_per_process+"
+            "data_mixing.robot_ratio+data_mixing.open_ratio"
+        )
+    else:
+        ratio_source = "robot_dataloader.batch_size/open_dataloader.batch_size"
+    robot_tail_policy = normalize_gaze_wam_tail_policy(
+        "robot_tail_policy",
+        batching_config.get("robot_tail_policy", "keep"),
+    )
+    open_tail_policy = normalize_gaze_wam_tail_policy(
+        "open_tail_policy",
+        batching_config.get("open_tail_policy", "keep"),
+    )
     return {
         "source": "two_zarr_two_dataset_online_mixed_batch",
         "separate_zarr_sources": robot_dataset_path != open_dataset_path,
@@ -110,6 +144,7 @@ def gaze_wam_data_stream_contract(
             "batch_size_per_process": robot_batch_size,
             "enabled": robot_batch_size > 0,
             "drives_epoch": robot_batch_size > 0,
+            "tail_policy": robot_tail_policy,
             "has_action": True,
             "normalizer_source": "robot_dataset_relative_actions_only",
         },
@@ -122,6 +157,7 @@ def gaze_wam_data_stream_contract(
             "batch_size_per_process": open_batch_size,
             "enabled": open_batch_size > 0,
             "drives_epoch": robot_batch_size <= 0 and open_batch_size > 0,
+            "tail_policy": open_tail_policy,
             "has_action": False,
             "action_values_used_for_loss": False,
         },
@@ -131,7 +167,14 @@ def gaze_wam_data_stream_contract(
                 "build_gaze_wam_mixed_batch"
             ),
             "mode": "online_per_step_concat_after_fetch",
-            "ratio_source": "robot_dataloader.batch_size/open_dataloader.batch_size",
+            "ratio_source": ratio_source,
+            "resolved_batch_size_source": resolved_batch_size_source,
+            "requested_total_batch_size_per_process": batching_config.get(
+                "requested_total_batch_size_per_process"
+            ),
+            "requested_robot_ratio": batching_config.get("requested_robot_ratio"),
+            "requested_open_ratio": batching_config.get("requested_open_ratio"),
+            "total_batch_size_per_process": total_batch_size,
             "shuffle_after_concat": True,
             "primary_epoch_driver": (
                 "robot_dataloader"
@@ -141,6 +184,8 @@ def gaze_wam_data_stream_contract(
                 else "none"
             ),
             "open_iterator_policy": "restart_on_exhaustion",
+            "robot_tail_policy": robot_tail_policy,
+            "open_tail_policy": open_tail_policy,
             "robot_ratio_per_process": (
                 robot_batch_size / total_batch_size if total_batch_size > 0 else 0.0
             ),
@@ -352,6 +397,313 @@ def normalize_gaze_wam_positive_int_sequence(
     ]
 
 
+def _normalize_choice_field(name: str, value, choices, default: str) -> str:
+    if value is None:
+        value = default
+    parsed = str(value).strip().lower()
+    if parsed not in choices:
+        options = ", ".join(str(item) for item in choices)
+        raise ValueError(f"{name} must be one of: {options}; got {value!r}.")
+    return parsed
+
+
+def normalize_gaze_wam_batch_size_source(name: str, value, default: str = "auto") -> str:
+    return _normalize_choice_field(
+        name,
+        value,
+        GAZE_WAM_BATCH_SIZE_SOURCES,
+        default,
+    )
+
+
+def normalize_gaze_wam_tail_policy(name: str, value, default: str = "keep") -> str:
+    return _normalize_choice_field(name, value, GAZE_WAM_TAIL_POLICIES, default)
+
+
+def normalize_gaze_wam_training_stage(
+    name: str,
+    value,
+    default: str = "mixed_train",
+) -> str:
+    return _normalize_choice_field(name, value, GAZE_WAM_TRAINING_STAGES, default)
+
+
+def normalize_gaze_wam_transfer_scope(
+    name: str,
+    value,
+    default: str = "obs_encoder",
+) -> str:
+    return _normalize_choice_field(name, value, GAZE_WAM_TRANSFER_SCOPES, default)
+
+
+def resolve_gaze_wam_batching_config(cfg) -> dict:
+    """Resolve source quotas from total batch size and requested source ratios.
+
+    ``auto`` preserves old Hydra overrides that directly change the two dataloader
+    batch sizes. New configs should use ``ratio`` so the total and ratios are the
+    single source of truth.
+    """
+    errors = []
+    mixing = cfg.get("data_mixing", None)
+    if mixing is None:
+        mixing = {}
+
+    legacy_robot_batch, error = _parse_int_field(
+        "robot_dataloader.batch_size",
+        cfg.robot_dataloader.get("batch_size", 0),
+    )
+    if error is not None:
+        errors.append(error)
+    legacy_open_batch, error = _parse_int_field(
+        "open_dataloader.batch_size",
+        cfg.open_dataloader.get("batch_size", 0),
+    )
+    if error is not None:
+        errors.append(error)
+    try:
+        batch_size_source = normalize_gaze_wam_batch_size_source(
+            "data_mixing.batch_size_source",
+            mixing.get("batch_size_source", "auto"),
+        )
+    except ValueError as exc:
+        errors.append(str(exc))
+        batch_size_source = "auto"
+
+    ratio_fields_present = any(
+        mixing.get(key, None) is not None
+        for key in (
+            "total_batch_size_per_process",
+            "robot_ratio",
+            "open_ratio",
+        )
+    )
+    requested_total = None
+    requested_robot_ratio = None
+    requested_open_ratio = None
+    ratio_robot_batch = None
+    ratio_open_batch = None
+    if ratio_fields_present or batch_size_source == "ratio":
+        try:
+            requested_total = normalize_gaze_wam_positive_int_field(
+                "data_mixing.total_batch_size_per_process",
+                mixing.get("total_batch_size_per_process", None),
+            )
+        except ValueError as exc:
+            errors.append(str(exc))
+        try:
+            requested_robot_ratio = normalize_gaze_wam_unit_interval_float_field(
+                "data_mixing.robot_ratio",
+                mixing.get("robot_ratio", None),
+                include_one=True,
+            )
+        except ValueError as exc:
+            errors.append(str(exc))
+        raw_open_ratio = mixing.get("open_ratio", None)
+        if requested_robot_ratio is not None and raw_open_ratio is None:
+            requested_open_ratio = 1.0 - requested_robot_ratio
+        else:
+            try:
+                requested_open_ratio = normalize_gaze_wam_unit_interval_float_field(
+                    "data_mixing.open_ratio",
+                    raw_open_ratio,
+                    include_one=True,
+                )
+            except ValueError as exc:
+                errors.append(str(exc))
+        if (
+            requested_robot_ratio is not None
+            and requested_open_ratio is not None
+            and not math.isclose(
+                requested_robot_ratio + requested_open_ratio,
+                1.0,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            )
+        ):
+            errors.append(
+                "data_mixing.robot_ratio + data_mixing.open_ratio must equal 1.0; "
+                f"got {requested_robot_ratio + requested_open_ratio:.12g}."
+            )
+        if (
+            requested_total is not None
+            and requested_robot_ratio is not None
+            and requested_open_ratio is not None
+            and math.isclose(
+                requested_robot_ratio + requested_open_ratio,
+                1.0,
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            )
+        ):
+            ratio_robot_batch = int(
+                math.floor(requested_total * requested_robot_ratio + 0.5)
+            )
+            ratio_open_batch = int(requested_total - ratio_robot_batch)
+            if requested_robot_ratio > 0.0 and ratio_robot_batch <= 0:
+                errors.append(
+                    "data_mixing total batch size is too small to allocate a positive "
+                    "robot quota for the requested robot_ratio."
+                )
+            if requested_open_ratio > 0.0 and ratio_open_batch <= 0:
+                errors.append(
+                    "data_mixing total batch size is too small to allocate a positive "
+                    "open-source quota for the requested open_ratio."
+                )
+
+    compatibility_fallback = False
+    if batch_size_source == "dataloader" or not ratio_fields_present:
+        resolved_source = "dataloader"
+        robot_batch_size = legacy_robot_batch
+        open_batch_size = legacy_open_batch
+    elif batch_size_source == "auto" and (
+        ratio_robot_batch != legacy_robot_batch
+        or ratio_open_batch != legacy_open_batch
+    ):
+        resolved_source = "dataloader"
+        compatibility_fallback = True
+        robot_batch_size = legacy_robot_batch
+        open_batch_size = legacy_open_batch
+    else:
+        resolved_source = "ratio"
+        robot_batch_size = ratio_robot_batch if ratio_robot_batch is not None else 0
+        open_batch_size = ratio_open_batch if ratio_open_batch is not None else 0
+
+    total_batch_size = int(robot_batch_size) + int(open_batch_size)
+    robot_ratio = (
+        float(robot_batch_size) / float(total_batch_size)
+        if total_batch_size > 0
+        else 0.0
+    )
+    open_ratio = (
+        float(open_batch_size) / float(total_batch_size)
+        if total_batch_size > 0
+        else 0.0
+    )
+    try:
+        robot_tail_policy = normalize_gaze_wam_tail_policy(
+            "data_mixing.robot_tail_policy",
+            mixing.get("robot_tail_policy", None),
+            default="keep" if not ratio_fields_present else "pad",
+        )
+    except ValueError as exc:
+        errors.append(str(exc))
+        robot_tail_policy = "keep"
+    try:
+        open_tail_policy = normalize_gaze_wam_tail_policy(
+            "data_mixing.open_tail_policy",
+            mixing.get("open_tail_policy", None),
+            default="keep" if not ratio_fields_present else "pad",
+        )
+    except ValueError as exc:
+        errors.append(str(exc))
+        open_tail_policy = "keep"
+    try:
+        validation_tail_policy = normalize_gaze_wam_tail_policy(
+            "data_mixing.validation_tail_policy",
+            mixing.get("validation_tail_policy", "keep"),
+            default="keep",
+        )
+    except ValueError as exc:
+        errors.append(str(exc))
+        validation_tail_policy = "keep"
+
+    return {
+        "batch_size_source": batch_size_source,
+        "resolved_batch_size_source": resolved_source,
+        "compatibility_fallback_to_dataloader": compatibility_fallback,
+        "ratio_fields_present": ratio_fields_present,
+        "requested_total_batch_size_per_process": requested_total,
+        "requested_robot_ratio": requested_robot_ratio,
+        "requested_open_ratio": requested_open_ratio,
+        "configured_robot_dataloader_batch_size": legacy_robot_batch,
+        "configured_open_dataloader_batch_size": legacy_open_batch,
+        "robot_batch_size": int(robot_batch_size),
+        "open_batch_size": int(open_batch_size),
+        "train_batch_size_per_process": int(total_batch_size),
+        "robot_ratio": robot_ratio,
+        "open_ratio": open_ratio,
+        "robot_tail_policy": robot_tail_policy,
+        "open_tail_policy": open_tail_policy,
+        "validation_tail_policy": validation_tail_policy,
+        "errors": errors,
+        "valid": len(errors) == 0,
+    }
+
+
+def gaze_wam_planned_optimizer_steps(
+    *,
+    steps_per_epoch: int,
+    num_epochs: int,
+    gradient_accumulate_every: int,
+    max_train_steps=None,
+) -> int:
+    steps_per_epoch = normalize_gaze_wam_positive_int_field(
+        "steps_per_epoch",
+        steps_per_epoch,
+    )
+    num_epochs = normalize_gaze_wam_positive_int_field("num_epochs", num_epochs)
+    gradient_accumulate_every = normalize_gaze_wam_positive_int_field(
+        "gradient_accumulate_every",
+        gradient_accumulate_every,
+    )
+    # Accumulation is flushed at every epoch boundary, so an incomplete final
+    # accumulation window costs one optimizer step per epoch.
+    planned = int(
+        math.ceil(steps_per_epoch / float(gradient_accumulate_every))
+        * num_epochs
+    )
+    if max_train_steps is not None:
+        max_train_steps = normalize_gaze_wam_positive_int_field(
+            "max_train_steps",
+            max_train_steps,
+        )
+        planned = min(planned, max_train_steps)
+    return max(planned, 1)
+
+
+def gaze_wam_prepared_dataloader_batches(
+    raw_batches: int,
+    *,
+    num_processes: int = 1,
+    split_batches: bool = False,
+    even_batches: bool = True,
+    drop_last: bool = False,
+    process_index: int = 0,
+) -> int:
+    """Mirror Accelerate's map-style batch sharding length calculation.
+
+    The scheduler is created before ``accelerator.prepare`` in the workspace,
+    so its step budget must use the same per-rank dataloader length that
+    Accelerate will produce.  In particular, ``drop_last`` uses floor division
+    while ``even_batches`` pads to the next process group.
+    """
+    raw_batches = normalize_gaze_wam_nonnegative_int_field(
+        "raw_batches", raw_batches
+    )
+    num_processes = normalize_gaze_wam_positive_int_field(
+        "num_processes", num_processes
+    )
+    process_index = normalize_gaze_wam_nonnegative_int_field(
+        "process_index", process_index
+    )
+    if process_index >= num_processes:
+        raise ValueError(
+            f"process_index must be less than num_processes; got "
+            f"{process_index} >= {num_processes}."
+        )
+    if raw_batches == 0:
+        return 0
+    if bool(split_batches) or num_processes == 1:
+        return raw_batches
+
+    quotient, remainder = divmod(raw_batches, num_processes)
+    if remainder == 0 or bool(drop_last):
+        return quotient
+    if bool(even_batches):
+        return quotient + 1
+    return quotient + (1 if process_index < remainder else 0)
+
+
 def _normalize_gaze_wam_early_bool_config(cfg):
     """Normalize bool fields used before or outside the shared training config gate."""
     fields = (
@@ -515,6 +867,8 @@ def validate_gaze_wam_training_config(cfg):
     """Summarize and validate training-loop parameters before Accelerator/DataLoader setup."""
     training = cfg.training
     errors = []
+    batching_config = resolve_gaze_wam_batching_config(cfg)
+    errors.extend(batching_config["errors"])
     robot_batch_size, error = _parse_int_field(
         "robot_dataloader.batch_size",
         cfg.robot_dataloader.get("batch_size", 0),
@@ -527,6 +881,9 @@ def validate_gaze_wam_training_config(cfg):
     )
     if error is not None:
         errors.append(error)
+    if batching_config["valid"]:
+        robot_batch_size = int(batching_config["robot_batch_size"])
+        open_batch_size = int(batching_config["open_batch_size"])
     val_robot_batch_size, error = _parse_int_field(
         "val_robot_dataloader.batch_size",
         cfg.val_robot_dataloader.get("batch_size", 0),
@@ -616,7 +973,7 @@ def validate_gaze_wam_training_config(cfg):
     }
     for dataloader_config in dataloaders.values():
         errors.extend(dataloader_config["errors"])
-    total_batch_size = robot_batch_size + open_batch_size
+    total_batch_size = int(robot_batch_size) + int(open_batch_size)
 
     for name, value in (
         ("training.gradient_accumulate_every", gradient_accumulate_every),
@@ -666,6 +1023,108 @@ def validate_gaze_wam_training_config(cfg):
             f"training.tqdm_interval_sec must be non-negative, got {tqdm_interval_sec}."
         )
 
+    try:
+        stage = normalize_gaze_wam_training_stage(
+            "training.stage",
+            training.get("stage", "mixed_train"),
+        )
+    except ValueError as exc:
+        errors.append(str(exc))
+        stage = "mixed_train"
+    transfer = training.get("transfer", None) or {}
+    transfer_load_path = str(transfer.get("load_path", "") or "").strip()
+    transfer_export_path = str(transfer.get("export_path", "") or "").strip()
+    try:
+        transfer_load_scope = normalize_gaze_wam_transfer_scope(
+            "training.transfer.load_scope",
+            transfer.get("load_scope", "obs_encoder"),
+        )
+    except ValueError as exc:
+        errors.append(str(exc))
+        transfer_load_scope = "obs_encoder"
+    try:
+        transfer_export_scope = normalize_gaze_wam_transfer_scope(
+            "training.transfer.export_scope",
+            transfer.get("export_scope", "obs_encoder"),
+        )
+    except ValueError as exc:
+        errors.append(str(exc))
+        transfer_export_scope = "obs_encoder"
+    try:
+        transfer_export_overwrite = normalize_gaze_wam_bool_field(
+            "training.transfer.export_overwrite",
+            transfer.get("export_overwrite", False),
+            default=False,
+        )
+    except ValueError as exc:
+        errors.append(str(exc))
+        transfer_export_overwrite = False
+    if stage in ("open_only", "open_pretrain") and robot_batch_size > 0:
+        errors.append(
+            f"training.stage={stage} requires robot_dataloader.batch_size=0 "
+            "so the epoch is open-source only."
+        )
+    if stage in ("mixed_train", "robot_finetune", "robot_only") and robot_batch_size <= 0:
+        errors.append(
+            f"training.stage={stage} requires a positive robot batch quota."
+        )
+    if stage == "mixed_train" and open_batch_size <= 0:
+        errors.append(
+            "training.stage=mixed_train requires a positive open-source quota; "
+            "use training.stage=robot_only for a robot-only run."
+        )
+    if stage == "robot_only" and open_batch_size > 0:
+        errors.append(
+            "training.stage=robot_only requires open_dataloader.batch_size=0."
+        )
+    if stage == "robot_finetune" and open_batch_size > 0:
+        errors.append(
+            "training.stage=robot_finetune requires open_dataloader.batch_size=0; "
+            "use mixed_train for a source mixture."
+        )
+    if stage in ("mixed_train", "robot_only", "robot_finetune") and val_robot_batch_size <= 0:
+        errors.append(
+            f"training.stage={stage} requires a positive val_robot_dataloader.batch_size "
+            "so robot validation remains the selection gate."
+        )
+    if stage in ("mixed_train", "robot_only", "robot_finetune"):
+        checkpoint_cfg = cfg.get("checkpoint", {}) or {}
+        checkpoint_topk = checkpoint_cfg.get("topk", {}) or {}
+        monitor_key = str(checkpoint_topk.get("monitor_key", ""))
+        if monitor_key != "val_robot_loss":
+            errors.append(
+                f"training.stage={stage} requires checkpoint.topk.monitor_key="
+                f"val_robot_loss, got {monitor_key!r}."
+            )
+    if stage == "open_pretrain" and max_train_steps is None:
+        errors.append(
+            "training.stage=open_pretrain requires an explicit positive "
+            "training.max_train_steps global step budget."
+        )
+    if stage in ("open_only", "open_pretrain") and open_batch_size <= 0:
+        errors.append(
+            f"training.stage={stage} requires a positive open-source batch quota."
+        )
+    if stage == "open_pretrain" and val_open_batch_size <= 0:
+        errors.append(
+            "training.stage=open_pretrain requires a positive "
+            "val_open_dataloader.batch_size for the optional ablation gate."
+        )
+    if stage == "open_pretrain" and transfer_export_path == "":
+        errors.append(
+            "training.stage=open_pretrain requires training.transfer.export_path "
+            "so the stage has an explicit hand-off artifact."
+        )
+    if stage == "robot_finetune" and transfer_load_path == "":
+        errors.append(
+            "training.stage=robot_finetune requires training.transfer.load_path."
+        )
+    if bool(training.get("resume", False)) and transfer_load_path:
+        errors.append(
+            "training.resume and training.transfer.load_path cannot be enabled "
+            "together; choose checkpoint resume or an explicit transfer hand-off."
+        )
+
     return {
         "robot_batch_size": robot_batch_size,
         "open_batch_size": open_batch_size,
@@ -682,6 +1141,17 @@ def validate_gaze_wam_training_config(cfg):
         "max_val_steps": max_val_steps,
         "lr_warmup_steps": lr_warmup_steps,
         "tqdm_interval_sec": tqdm_interval_sec,
+        "batching": batching_config,
+        "stage": stage,
+        "transfer": {
+            "load_path": transfer_load_path,
+            "load_scope": transfer_load_scope,
+            "export_path": transfer_export_path,
+            "export_scope": transfer_export_scope,
+            "export_overwrite": transfer_export_overwrite,
+            "export_path_configured": bool(transfer_export_path),
+            "export_path_optional_warning": False,
+        },
         "dataloaders": dataloaders,
         "errors": errors,
         "valid": len(errors) == 0,
@@ -714,6 +1184,50 @@ def _normalize_gaze_wam_training_config(cfg, training_config):
     cfg.training.max_val_steps = optional_int("max_val_steps")
     cfg.training.lr_warmup_steps = int(training_config["lr_warmup_steps"])
     cfg.training.tqdm_interval_sec = float(training_config["tqdm_interval_sec"])
+    cfg.training.stage = str(training_config["stage"])
+    if "transfer" in cfg.training:
+        with open_dict(cfg.training.transfer):
+            cfg.training.transfer.load_path = str(
+                training_config["transfer"]["load_path"]
+            )
+            cfg.training.transfer.load_scope = str(
+                training_config["transfer"]["load_scope"]
+            )
+            cfg.training.transfer.export_path = str(
+                training_config["transfer"]["export_path"]
+            )
+            cfg.training.transfer.export_scope = str(
+                training_config["transfer"]["export_scope"]
+            )
+            cfg.training.transfer.export_overwrite = bool(
+                training_config["transfer"]["export_overwrite"]
+            )
+    if "data_mixing" in cfg:
+        batching = training_config["batching"]
+        with open_dict(cfg.data_mixing):
+            cfg.data_mixing.resolved_batch_size_source = str(
+                batching["resolved_batch_size_source"]
+            )
+            cfg.data_mixing.resolved_robot_batch_size = int(
+                batching["robot_batch_size"]
+            )
+            cfg.data_mixing.resolved_open_batch_size = int(
+                batching["open_batch_size"]
+            )
+            cfg.data_mixing.resolved_total_batch_size_per_process = int(
+                batching["train_batch_size_per_process"]
+            )
+            cfg.data_mixing.resolved_robot_ratio = float(batching["robot_ratio"])
+            cfg.data_mixing.resolved_open_ratio = float(batching["open_ratio"])
+            cfg.data_mixing.resolved_robot_tail_policy = str(
+                batching["robot_tail_policy"]
+            )
+            cfg.data_mixing.resolved_open_tail_policy = str(
+                batching["open_tail_policy"]
+            )
+            cfg.data_mixing.resolved_validation_tail_policy = str(
+                batching["validation_tail_policy"]
+            )
     for key, dataloader_config in training_config["dataloaders"].items():
         dataloader_cfg = cfg[key]
         dataloader_cfg.num_workers = int(dataloader_config["num_workers"])

@@ -21,7 +21,7 @@ class GazeWamTransformerOutput:
 
 
 def _normalize_positive_int(name: str, value) -> int:
-    return normalize_gaze_wam_positive_int_field(name, value)
+    return normalize_gaze_wam_positive_int_field(name, value, default=None)
 
 
 def _normalize_optional_positive_int(name: str, value) -> Optional[int]:
@@ -142,6 +142,7 @@ class JointGazeWamTransformer(ModuleAttrMixin):
         self.heatmap_head = nn.Linear(n_emb, heatmap_dim)
 
         self.apply(self._init_weights)
+        del self._dummy_variable
 
     def _init_weights(self, module):
         ignore_types = (
@@ -202,8 +203,6 @@ class JointGazeWamTransformer(ModuleAttrMixin):
 
         param_dict = {pn: p for pn, p in self.named_parameters()}
         no_decay.add("pos_emb")
-        if "_dummy_variable" in param_dict:
-            no_decay.add("_dummy_variable")
 
         inter_params = decay & no_decay
         union_params = decay | no_decay

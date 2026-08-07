@@ -207,9 +207,15 @@ def _score_candidate(summary: Dict[str, Any], role: str) -> int:
         if any(token in key for token in ("gaze", "eye", "fixation")):
             score += 20
     elif role == "heatmap":
-        if rank in (3, 4):
+        has_heatmap_name = any(token in key for token in ("heatmap", "map", "mask"))
+        has_heatmap_shape = rank == 3 or (
+            rank == 4 and (shape[1] == 1 or shape[-1] == 1)
+        )
+        if not has_heatmap_name and not has_heatmap_shape:
+            return 0
+        if has_heatmap_shape:
             score += 25
-        if any(token in key for token in ("heatmap", "map", "mask")):
+        if has_heatmap_name:
             score += 20
     elif role == "timestamp":
         if rank in (1, 2) and (rank == 1 or shape[-1] == 1):
@@ -305,7 +311,7 @@ def _canonicalizer_args(suggestions: Dict[str, List[Dict[str, Any]]]) -> Optiona
         return None
     has_gaze_label = bool(suggestions.get("gaze"))
     has_heatmap_label = bool(suggestions.get("heatmap"))
-    if not has_gaze_label and not has_heatmap_label:
+    if not has_gaze_label:
         return None
     args = [
         "--camera-key",
@@ -347,9 +353,8 @@ def _mapping_status(
         for role in required_robot_roles
         if guessed_type == "robot" and not suggestions.get(role)
     ]
-    has_any_gaze_label = bool(suggestions.get("gaze") or suggestions.get("heatmap"))
-    if guessed_type == "robot" and not has_any_gaze_label:
-        missing_required.append("gaze_or_heatmap")
+    if guessed_type == "robot" and not suggestions.get("gaze"):
+        missing_required.append("gaze")
     optional_missing = [
         role
         for role in ("gaze", "heatmap", "timestamp")

@@ -14,8 +14,9 @@ import torch.nn as nn
 import zarr
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from hydra import compose, initialize_config_dir
+from hydra.errors import InstantiationException
 from hydra.utils import instantiate
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 
 ROOT_DIR = os.path.dirname(os.path.dirname(__file__))
 sys.path.append(ROOT_DIR)
@@ -89,6 +90,7 @@ from diffusion_policy.scripts.eval_gaze_wam_metrics import (  # noqa: E402
 import diffusion_policy.scripts.eval_gaze_wam_metrics as eval_gaze_wam_metrics_module  # noqa: E402
 from diffusion_policy.scripts.compare_gaze_wam_ablation_metrics import (  # noqa: E402
     DEFAULT_VARIANTS as COMPARE_DEFAULT_VARIANTS,
+    _config_provenance,
     compare_gaze_wam_ablation_metrics,
     write_metrics_csv,
 )
@@ -207,10 +209,12 @@ from diffusion_policy.workspace.train_gaze_wam_workspace import (  # noqa: E402
     _RestartingDataLoaderIterator,
     _check_training_dataloader_lengths,
     _check_training_dataset_lengths,
+    _gaze_wam_checkpoint_due,
     _make_cpu_generator,
     _normalize_gaze_wam_training_config,
     _normalize_gaze_wam_task_routing_config,
     _select_heatmap_preview_indices,
+    _validate_prepared_epoch_driver_length,
     validate_gaze_wam_training_config,
     validate_gaze_wam_task_routing_config,
 )
@@ -1587,18 +1591,28 @@ def test_joint_transformer_optimizer_groups_cover_params_without_dummy_variable(
     assert groups[1]["weight_decay"] == 0.0
 
 
-def test_gaze_wam_policy_optimizer_requires_backbone_group_for_separate_obs_lr():
+def test_gaze_wam_policy_optimizer_requires_backbone_group_for_separate_obs_lr(tmp_path):
     scheduler = DDPMScheduler(
         num_train_timesteps=10,
         beta_schedule="squaredcos_cap_v2",
         prediction_type="epsilon",
     )
     shape_meta = {"action": {"shape": [10], "horizon": 4}}
+    encoder_path, decoder_path = _write_fake_cosmos_jit_pair(
+        tmp_path,
+        image_size=(256, 256),
+        token_grid=(2, 4),
+        latent_channels=1,
+    )
     common_policy_kwargs = {
         "shape_meta": shape_meta,
         "noise_scheduler": scheduler,
         "heatmap_num_tokens": 8,
         "heatmap_token_grid": (2, 4),
+        "heatmap_image_size": (256, 256),
+        "heatmap_dim": 1,
+        "heatmap_cosmos_encoder_path": encoder_path,
+        "heatmap_cosmos_decoder_path": decoder_path,
         "n_emb": 32,
     }
 
@@ -1920,6 +1934,7 @@ def test_joint_transformer_optional_frame_embedding_ids_and_validation():
         n_emb=16,
         p_drop_emb=0.0,
         p_drop_attn=0.0,
+        use_block_attention_mask=False,
         use_frame_embedding=True,
         image_tokens_per_frame=4,
         max_obs_frames=2,
@@ -2062,18 +2077,16 @@ def test_joint_transformer_rejects_invalid_core_integer_dimensions():
             raise AssertionError(f"Expected invalid core dimensions to fail: {overrides!r}")
 
 
-def test_no_block_mask_debug_config_instantiates_unmasked_policy():
+def test_cached_dual_stream_config_rejects_unmasked_policy():
     config_dir = str(Path("diffusion_policy/config").resolve())
     with initialize_config_dir(config_dir=config_dir, version_base=None):
-        cfg = compose(config_name="train_gaze_wam_no_block_mask_debug_workspace")
+        cfg = compose(
+            config_name="train_gaze_wam_debug_workspace",
+            overrides=["policy.use_block_attention_mask='false'"],
+        )
 
-    assert cfg.policy.use_block_attention_mask is False
-    policy = instantiate(cfg.policy)
-    assert policy.model.use_block_attention_mask is False
-    assert policy.model.build_block_attention_mask(num_image_tokens=4, include_heatmap=True).shape == (
-        4 + 1 + policy.action_horizon + policy.heatmap_num_tokens,
-        4 + 1 + policy.action_horizon + policy.heatmap_num_tokens,
-    )
+    with pytest.raises(InstantiationException, match="always enforces condition/target"):
+        instantiate(cfg.policy)
 
 
 def test_gaze_wam_policy_and_obs_encoder_normalize_string_bool_overrides():
@@ -2082,7 +2095,7 @@ def test_gaze_wam_policy_and_obs_encoder_normalize_string_bool_overrides():
         cfg = compose(
             config_name="train_gaze_wam_debug_workspace",
             overrides=[
-                "policy.use_block_attention_mask='false'",
+                "policy.use_block_attention_mask='true'",
                 "policy.obs_encoder.pretrained='false'",
                 "policy.obs_encoder.use_group_norm='false'",
                 "policy.obs_encoder.share_rgb_model='off'",
@@ -2091,7 +2104,7 @@ def test_gaze_wam_policy_and_obs_encoder_normalize_string_bool_overrides():
 
     policy = instantiate(cfg.policy)
 
-    assert policy.model.use_block_attention_mask is False
+    assert policy.model.use_block_attention_mask is True
     assert policy.obs_encoder.pretrained is False
     assert policy.obs_encoder.share_rgb_model is False
 
@@ -2112,68 +2125,58 @@ def test_gaze_wam_debug_config_instantiates_policy_contract():
     assert policy.model.action_dim == 10
     assert policy.model.action_horizon == 16
     assert policy.model.heatmap_num_tokens == 256
-    assert policy.model.heatmap_dim == 1
+    assert policy.model.heatmap_dim == 16
     assert policy.model.max_image_tokens >= 512
     assert policy.model.use_block_attention_mask is True
     assert policy.model.action_head.out_features == 10
-    assert policy.model.heatmap_head.out_features == 1
+    assert policy.model.heatmap_head.out_features == 16
     assert policy.heatmap_codec.token_grid == (16, 16)
     assert policy.heatmap_codec.image_size == (256, 256)
     assert policy.num_inference_steps == 2
-    assert policy.loss_routing_contract_summary() == {
-        "source": "policy",
-        "dynamic_head_freezing": False,
-        "action_loss_mask": "(~is_open) & has_action",
-        "heatmap_loss_mask": "has_heatmap",
-        "open_rows": {
-            "has_action": False,
-            "has_heatmap": True,
-            "use_gaze_condition": False,
-            "gaze_token": "learned_mask",
-            "trains_action": False,
-            "trains_heatmap": True,
-        },
-        "robot_real_gaze_rows": {
-            "is_open": False,
-            "has_action": True,
-            "use_gaze_condition": True,
-            "has_heatmap": False,
-            "trains_action": True,
-            "trains_heatmap": False,
-        },
-        "robot_masked_gaze_rows": {
-            "is_open": False,
-            "has_action": True,
-            "use_gaze_condition": False,
-            "gaze_token": "learned_mask",
-            "trains_action": True,
-            "trains_heatmap": "has_heatmap",
-        },
-        "validation": {
-            "open_rows_must_not_have_action": True,
-            "open_rows_must_have_heatmap": True,
-            "open_rows_must_use_mask_token": True,
-            "robot_rows_must_have_action": True,
-            "inactive_action_rows_must_be_zero_placeholders": True,
-            "inactive_heatmap_rows_must_be_zero_placeholders": True,
-            "inactive_gaze_rows_must_be_zero_placeholders": True,
-            "inactive_optional_metadata_rows_must_be_zero_placeholders": True,
-            "robot_real_gaze_rows_must_not_have_heatmap_loss": True,
-            "is_gaze_condition_dropped_equals_not_use_gaze_condition": True,
-        },
+    routing = policy.loss_routing_contract_summary()
+    assert routing["source"] == "policy"
+    assert routing["dynamic_head_freezing"] is False
+    assert routing["action_loss_mask"] == "(~is_open) & has_action"
+    assert routing["heatmap_loss_mask"] == "has_heatmap & has_gaze_label"
+    assert (
+        routing["heatmap_supervision"]
+        == "full_resolution_dsnt_plus_js_after_frozen_decoder"
+    )
+    assert routing["open_rows"] == {
+        "has_action": False,
+        "has_heatmap": True,
+        "use_gaze_condition": False,
+        "gaze_token": "learned_mask",
+        "trains_action": False,
+        "trains_heatmap": "xy DSNT plus generated Gaussian JS target",
     }
-    assert tuple(policy.loss_routing_contract_summary()["validation"].keys()) == (
+    assert routing["robot_real_gaze_rows"] == {
+        "is_open": False,
+        "has_action": True,
+        "use_gaze_condition": True,
+        "has_heatmap": False,
+        "trains_action": True,
+        "trains_heatmap": False,
+    }
+    assert routing["robot_masked_gaze_rows"] == {
+        "is_open": False,
+        "has_action": True,
+        "use_gaze_condition": False,
+        "gaze_token": "learned_mask",
+        "trains_action": True,
+        "trains_heatmap": "has_heatmap & has_gaze_label",
+    }
+    assert set(routing["validation"]) == set(
         gaze_wam_required_loss_routing_validation_flags()
     )
+    assert all(routing["validation"].values())
 
 
 def test_gaze_wam_ablation_workspace_config_switches():
-    assert "main=train_gaze_wam_workspace" in COMPARE_DEFAULT_VARIANTS
-    assert (
-        "cached_dual_stream=train_gaze_wam_cached_dual_stream_workspace"
-        in COMPARE_DEFAULT_VARIANTS
+    assert COMPARE_DEFAULT_VARIANTS == (
+        "robot_only_baseline=train_gaze_wam_robot_only_workspace",
+        "mixed_main=train_gaze_wam_workspace",
     )
-    assert "open_only=train_gaze_wam_open_only_workspace" in COMPARE_DEFAULT_VARIANTS
 
     config_dir = str(Path("diffusion_policy/config").resolve())
     with initialize_config_dir(config_dir=config_dir, version_base=None):
@@ -2182,13 +2185,16 @@ def test_gaze_wam_ablation_workspace_config_switches():
             config_name="train_gaze_wam_cached_dual_stream_workspace"
         )
         open_only_cfg = compose(config_name="train_gaze_wam_open_only_workspace")
+        robot_finetune_cfg = compose(
+            config_name="train_gaze_wam_robot_finetune_workspace"
+        )
 
     assert main_cfg.open_dataloader.batch_size > 0
     assert main_cfg.val_robot_dataloader.shuffle is False
     assert main_cfg.val_open_dataloader.shuffle is False
     assert main_cfg.training.val_every == 1
     assert main_cfg.training.val_mixing_seed == 100003
-    assert main_cfg.checkpoint.topk.monitor_key == "val_loss"
+    assert main_cfg.checkpoint.topk.monitor_key == "val_robot_loss"
     assert main_cfg.task.robot_gaze_dropout_prob == 0.2
     assert main_cfg.task.robot_heatmap_on_gaze_dropout is True
     assert main_cfg.policy.use_block_attention_mask is True
@@ -2217,6 +2223,50 @@ def test_gaze_wam_ablation_workspace_config_switches():
     assert open_only_cfg.policy.heatmap_dsnt_temperature == 0.1
     assert open_only_cfg.policy.heatmap_distribution_mode == "intensity_softplus"
     assert open_only_cfg.training.gdr_every == 0
+    assert robot_finetune_cfg.training.stage == "robot_finetune"
+    assert robot_finetune_cfg.robot_dataloader.batch_size > 0
+    assert robot_finetune_cfg.open_dataloader.batch_size == 0
+    assert robot_finetune_cfg.training.transfer.load_scope == "obs_encoder"
+    assert robot_finetune_cfg.training.transfer.load_path.endswith(
+        "gaze_wam_open_pretrain_obs_encoder.pt"
+    )
+
+
+def test_compare_provenance_resolves_ratio_quota_from_data_mixing():
+    cfg = load_cfg(
+        "train_gaze_wam_workspace",
+        overrides=[
+            "robot_dataloader.batch_size=6",
+            "open_dataloader.batch_size=2",
+        ],
+    )
+    row = _config_provenance(
+        cfg=cfg,
+        checkpoint=None,
+        sources=("robot", "open"),
+        batch_size=2,
+        max_batches=1,
+        cfg_scale=None,
+    )
+
+    assert row["training_stage"] == "mixed_train"
+    assert row["batch_size_source"] == "ratio"
+    assert row["requested_batch_size_source"] == "ratio"
+    assert row["total_batch_size_per_process"] == 64
+    assert row["requested_total_batch_size_per_process"] == 64
+    assert row["requested_robot_ratio"] == pytest.approx(0.75)
+    assert row["requested_open_ratio"] == pytest.approx(0.25)
+    assert (row["robot_batch_size"], row["open_batch_size"]) == (48, 16)
+
+
+def test_gaze_wam_prepared_length_and_terminal_checkpoint_boundaries():
+    assert _validate_prepared_epoch_driver_length(5, 5) == 5
+    with pytest.raises(RuntimeError, match="planned=5, actual=4"):
+        _validate_prepared_epoch_driver_length(5, 4)
+
+    assert _gaze_wam_checkpoint_due(3, 2, False) is False
+    assert _gaze_wam_checkpoint_due(4, 2, False) is True
+    assert _gaze_wam_checkpoint_due(3, 100, True) is True
 
 
 def test_gaze_wam_policy_training_root_wrappers_prefer_repo_imports():
@@ -2909,9 +2959,9 @@ def test_gaze_wam_debug_workspace_logs_validation_metrics():
         assert contract["checks"]["open_image_size_matches_task"] is True
         assert contract["checks"]["robot_sampling_matches_task"] is True
         assert contract["checks"]["open_sampling_matches_task"] is True
-        assert contract["checks"]["robot_metadata_dataset_type"] is True
-        assert contract["checks"]["robot_metadata_image_resize_mode"] is True
-        assert contract["checks"]["robot_metadata_image_size"] is True
+        assert contract["checks"]["robot_metadata_dataset_type_when_enabled"] is True
+        assert contract["checks"]["robot_metadata_image_resize_mode_when_enabled"] is True
+        assert contract["checks"]["robot_metadata_image_size_when_enabled"] is True
         assert contract["checks"]["open_metadata_dataset_type_when_enabled"] is True
         assert contract["checks"]["open_metadata_image_resize_mode_when_enabled"] is True
         assert contract["checks"]["open_metadata_image_size_when_enabled"] is True
@@ -2961,7 +3011,10 @@ def test_gaze_wam_debug_workspace_logs_validation_metrics():
         assert contract["data_stream"]["mixing"]["mode"] == "online_per_step_concat_after_fetch"
         assert (
             contract["data_stream"]["mixing"]["ratio_source"]
-            == "robot_dataloader.batch_size/open_dataloader.batch_size"
+            == (
+                "data_mixing.total_batch_size_per_process+"
+                "data_mixing.robot_ratio+data_mixing.open_ratio"
+            )
         )
         assert contract["data_stream"]["mixing"]["robot_ratio_per_process"] == 0.75
         assert contract["data_stream"]["mixing"]["open_ratio_per_process"] == 0.25
@@ -2987,7 +3040,7 @@ def test_gaze_wam_debug_workspace_logs_validation_metrics():
         ] == [10]
         assert contract["optional_metadata"]["samples"]["open_train"]["available"] is True
         assert contract["checks"]["obs_encoder_pretrained"] is False
-        assert contract["checks"]["obs_encoder_local_weight_source_configured"] is False
+        assert contract["checks"]["obs_encoder_local_weight_source_optional"] is True
         assert contract["checks"]["obs_encoder_local_weight_source_exists"] is True
         assert contract["checks"]["obs_encoder_local_weight_source_valid"] is True
         assert contract["checks"]["obs_encoder_checkpoint_path_file_when_configured"] is True
@@ -3003,6 +3056,15 @@ def test_gaze_wam_debug_workspace_logs_validation_metrics():
         assert contract["batching"]["effective_train_batch_size_per_optimizer_step"] == 8
         assert contract["batching"]["mixed_precision"] == "no"
         assert contract["batching"]["distributed_type"] == "NO"
+        assert contract["batching"]["requested_batch_size_source"] == "auto"
+        assert contract["batching"]["resolved_batch_size_source"] == "ratio"
+        assert contract["batching"]["compatibility_fallback_to_dataloader"] is False
+        assert contract["batching"]["ratio_fields_present"] is True
+        assert contract["batching"]["requested_total_batch_size_per_process"] == 4
+        assert contract["batching"]["requested_robot_ratio"] == 0.75
+        assert contract["batching"]["requested_open_ratio"] == 0.25
+        assert contract["batching"]["configured_robot_dataloader_batch_size"] == 3
+        assert contract["batching"]["configured_open_dataloader_batch_size"] == 1
         expected_batch_streaming = {
             "robot_train_enabled": True,
             "open_train_enabled": True,
@@ -3056,9 +3118,12 @@ def test_gaze_wam_debug_workspace_logs_validation_metrics():
         assert contract["routing"]["source"] == "policy"
         assert contract["routing"]["dynamic_head_freezing"] is False
         assert contract["routing"]["action_loss_mask"] == "(~is_open) & has_action"
-        assert contract["routing"]["heatmap_loss_mask"] == "has_heatmap"
+        assert contract["routing"]["heatmap_loss_mask"] == "has_heatmap & has_gaze_label"
         assert contract["routing"]["open_rows"]["trains_action"] is False
-        assert contract["routing"]["open_rows"]["trains_heatmap"] is True
+        assert (
+            contract["routing"]["open_rows"]["trains_heatmap"]
+            == "xy DSNT plus generated Gaussian JS target"
+        )
         assert contract["routing"]["open_rows"]["use_gaze_condition"] is False
         assert contract["routing"]["robot_real_gaze_rows"]["trains_action"] is True
         assert contract["routing"]["robot_real_gaze_rows"]["trains_heatmap"] is False
@@ -3097,7 +3162,11 @@ def test_gaze_wam_debug_workspace_logs_validation_metrics():
             == "decoded_intensity_distribution"
         )
         assert contract["loss"]["heatmap_objective"] == "dsnt_js"
-        assert contract["checks"]["normalizer_source_robot_relative_only"] is True
+        assert (
+            contract["checks"]["normalizer_source_robot_relative_when_robot_enabled"]
+            is True
+        )
+        assert contract["checks"]["normalizer_source_matches_active_sources"] is True
         assert contract["checks"]["normalizer_keys_match_robot_camera_and_action"] is True
         assert contract["checks"]["normalizer_action_dim_10"] is True
         assert contract["checks"]["normalizer_excludes_open_dummy_actions"] is True
@@ -3165,6 +3234,26 @@ def test_gaze_wam_debug_workspace_logs_validation_metrics():
         assert int(checkpoint_cfg.training.num_processes) == contract["batching"]["num_processes"]
         assert checkpoint_cfg.training.mixed_precision == contract["batching"]["mixed_precision"]
         assert checkpoint_cfg.training.distributed_type == contract["batching"]["distributed_type"]
+        assert (
+            checkpoint_cfg.data_mixing.requested_batch_size_source
+            == contract["batching"]["requested_batch_size_source"]
+        )
+        assert (
+            checkpoint_cfg.data_mixing.resolved_batch_size_source
+            == contract["batching"]["resolved_batch_size_source"]
+        )
+        assert (
+            checkpoint_cfg.data_mixing.requested_total_batch_size_per_process
+            == contract["batching"]["requested_total_batch_size_per_process"]
+        )
+        assert (
+            checkpoint_cfg.data_mixing.requested_robot_ratio
+            == contract["batching"]["requested_robot_ratio"]
+        )
+        assert (
+            checkpoint_cfg.data_mixing.requested_open_ratio
+            == contract["batching"]["requested_open_ratio"]
+        )
         assert (
             int(checkpoint_cfg.training.effective_robot_batch_size_per_optimizer_step)
             == contract["batching"]["effective_robot_batch_size_per_optimizer_step"]
@@ -3256,7 +3345,7 @@ def test_gaze_wam_debug_workspace_logs_validation_metrics():
         assert pred_overlay.shape[:2] == (256, 256)
 
 
-def test_gaze_wam_policy_mixed_batch_loss_and_inference():
+def test_gaze_wam_policy_mixed_batch_loss_and_inference(tmp_path):
     torch.manual_seed(2)
     shape_meta = {
         "action": {
@@ -3268,6 +3357,12 @@ def test_gaze_wam_policy_mixed_batch_loss_and_inference():
         num_train_timesteps=10,
         beta_schedule="squaredcos_cap_v2",
         prediction_type="epsilon",
+    )
+    encoder_path, decoder_path = _write_fake_cosmos_jit_pair(
+        tmp_path,
+        image_size=(256, 256),
+        token_grid=(1, 8),
+        latent_channels=1,
     )
     obs_encoder = FakeTokenObsEncoder(num_tokens=8, embed_dim=32)
     model = JointGazeWamTransformer(
@@ -3292,6 +3387,9 @@ def test_gaze_wam_policy_mixed_batch_loss_and_inference():
         num_inference_steps=2,
         input_pertub=0.0,
         heatmap_num_tokens=8,
+        heatmap_token_grid=(1, 8),
+        heatmap_cosmos_encoder_path=encoder_path,
+        heatmap_cosmos_decoder_path=decoder_path,
         n_emb=32,
     )
     normalizer = LinearNormalizer()
@@ -3605,11 +3703,17 @@ def test_gaze_wam_policy_diffusion_mixed_final_heatmap_loss_adds_decoded_terms(t
     assert torch.isfinite(policy.model.heatmap_head.weight.grad).all()
 
 
-def test_gaze_wam_policy_rejects_invalid_loss_batch_contract():
+def test_gaze_wam_policy_rejects_invalid_loss_batch_contract(tmp_path):
     scheduler = DDPMScheduler(
         num_train_timesteps=10,
         beta_schedule="squaredcos_cap_v2",
         prediction_type="epsilon",
+    )
+    encoder_path, decoder_path = _write_fake_cosmos_jit_pair(
+        tmp_path,
+        image_size=(256, 256),
+        token_grid=(1, 8),
+        latent_channels=1,
     )
     policy = GazeWamPolicy(
         shape_meta={"action": {"shape": [10], "horizon": 4}},
@@ -3631,8 +3735,15 @@ def test_gaze_wam_policy_rejects_invalid_loss_batch_contract():
         num_inference_steps=2,
         input_pertub=0.0,
         heatmap_num_tokens=8,
+        heatmap_token_grid=(1, 8),
+        heatmap_cosmos_encoder_path=encoder_path,
+        heatmap_cosmos_decoder_path=decoder_path,
         n_emb=32,
     )
+    normalizer = LinearNormalizer()
+    normalizer["camera0_rgb"] = SingleFieldLinearNormalizer.create_identity()
+    normalizer["action"] = SingleFieldLinearNormalizer.create_identity()
+    policy.set_normalizer(normalizer)
 
     batch = {
         "obs": {"camera0_rgb": torch.randn(4, 2, 3, 16, 16)},
@@ -3650,6 +3761,7 @@ def test_gaze_wam_policy_rejects_invalid_loss_batch_contract():
         "has_heatmap": torch.tensor([False, True, True, True]),
         "has_gaze_label": torch.tensor([True, True, True, True]),
         "use_gaze_condition": torch.tensor([True, False, False, False]),
+        "is_gaze_condition_dropped": torch.tensor([False, True, True, True]),
     }
     batch["action"][2:] = 0.0
     batch["action_abs"][2:] = 0.0
@@ -3862,7 +3974,7 @@ def test_gaze_wam_policy_rejects_invalid_loss_batch_contract():
             "bad_dropout_mask",
             lambda b: b.__setitem__(
                 "is_gaze_condition_dropped",
-                torch.tensor([False, True, True, True]),
+                torch.tensor([False, False, True, True]),
             ),
             "is_gaze_condition_dropped",
         ),
@@ -4223,7 +4335,7 @@ def test_gaze_wam_policy_rejects_invalid_scalar_hyperparameters(tmp_path):
             raise AssertionError(f"Expected invalid {expected}={kwargs[expected]!r} to fail.")
 
 
-def test_gaze_wam_policy_predicts_absolute_action_and_cfg():
+def test_gaze_wam_policy_predicts_absolute_action_and_cfg(tmp_path):
     torch.manual_seed(3)
     shape_meta = {
         "action": {
@@ -4235,6 +4347,12 @@ def test_gaze_wam_policy_predicts_absolute_action_and_cfg():
         num_train_timesteps=10,
         beta_schedule="squaredcos_cap_v2",
         prediction_type="epsilon",
+    )
+    encoder_path, decoder_path = _write_fake_cosmos_jit_pair(
+        tmp_path,
+        image_size=(16, 16),
+        token_grid=(2, 4),
+        latent_channels=1,
     )
     obs_encoder = FakeTokenObsEncoder(num_tokens=8, embed_dim=32)
     model = JointGazeWamTransformer(
@@ -4258,6 +4376,10 @@ def test_gaze_wam_policy_predicts_absolute_action_and_cfg():
         num_inference_steps=2,
         input_pertub=0.0,
         heatmap_num_tokens=8,
+        heatmap_token_grid=(2, 4),
+        heatmap_image_size=(16, 16),
+        heatmap_cosmos_encoder_path=encoder_path,
+        heatmap_cosmos_decoder_path=decoder_path,
         n_emb=32,
     )
     normalizer = LinearNormalizer()
@@ -4385,7 +4507,7 @@ def test_gaze_wam_policy_predicts_absolute_action_and_cfg():
         raise AssertionError("Expected malformed action_base_abs mask to fail.")
 
 
-def test_gaze_wam_policy_filters_non_model_obs_metadata():
+def test_gaze_wam_policy_filters_non_model_obs_metadata(tmp_path):
     torch.manual_seed(30)
     shape_meta = {
         "action": {
@@ -4397,6 +4519,12 @@ def test_gaze_wam_policy_filters_non_model_obs_metadata():
         num_train_timesteps=10,
         beta_schedule="squaredcos_cap_v2",
         prediction_type="epsilon",
+    )
+    encoder_path, decoder_path = _write_fake_cosmos_jit_pair(
+        tmp_path,
+        image_size=(16, 16),
+        token_grid=(2, 4),
+        latent_channels=1,
     )
     obs_encoder = FakeTokenObsEncoder(num_tokens=8, embed_dim=32)
     policy = GazeWamPolicy(
@@ -4419,6 +4547,10 @@ def test_gaze_wam_policy_filters_non_model_obs_metadata():
         num_inference_steps=2,
         input_pertub=0.0,
         heatmap_num_tokens=8,
+        heatmap_token_grid=(2, 4),
+        heatmap_image_size=(16, 16),
+        heatmap_cosmos_encoder_path=encoder_path,
+        heatmap_cosmos_decoder_path=decoder_path,
         n_emb=32,
     )
     normalizer = LinearNormalizer()
@@ -4464,7 +4596,7 @@ def test_gaze_wam_policy_filters_non_model_obs_metadata():
     assert obs_encoder.last_obs_keys == ("camera0_rgb",)
 
 
-def test_gaze_wam_policy_rejects_metadata_only_obs_dict():
+def test_gaze_wam_policy_rejects_metadata_only_obs_dict(tmp_path):
     torch.manual_seed(32)
     shape_meta = {
         "action": {
@@ -4476,6 +4608,12 @@ def test_gaze_wam_policy_rejects_metadata_only_obs_dict():
         num_train_timesteps=10,
         beta_schedule="squaredcos_cap_v2",
         prediction_type="epsilon",
+    )
+    encoder_path, decoder_path = _write_fake_cosmos_jit_pair(
+        tmp_path,
+        image_size=(16, 16),
+        token_grid=(2, 4),
+        latent_channels=1,
     )
     policy = GazeWamPolicy(
         shape_meta=shape_meta,
@@ -4497,6 +4635,10 @@ def test_gaze_wam_policy_rejects_metadata_only_obs_dict():
         num_inference_steps=2,
         input_pertub=0.0,
         heatmap_num_tokens=8,
+        heatmap_token_grid=(2, 4),
+        heatmap_image_size=(16, 16),
+        heatmap_cosmos_encoder_path=encoder_path,
+        heatmap_cosmos_decoder_path=decoder_path,
         n_emb=32,
     )
     normalizer = LinearNormalizer()
@@ -4521,7 +4663,7 @@ def test_gaze_wam_policy_rejects_metadata_only_obs_dict():
         raise AssertionError("Expected metadata-only obs_dict to fail.")
 
 
-def test_gaze_wam_inference_adapter_history_mask_and_absolute_output():
+def test_gaze_wam_inference_adapter_history_mask_and_absolute_output(tmp_path):
     torch.manual_seed(31)
     shape_meta = {
         "obs": {
@@ -4540,6 +4682,12 @@ def test_gaze_wam_inference_adapter_history_mask_and_absolute_output():
         num_train_timesteps=10,
         beta_schedule="squaredcos_cap_v2",
         prediction_type="epsilon",
+    )
+    encoder_path, decoder_path = _write_fake_cosmos_jit_pair(
+        tmp_path,
+        image_size=(16, 16),
+        token_grid=(2, 4),
+        latent_channels=1,
     )
     policy = GazeWamPolicy(
         shape_meta=shape_meta,
@@ -4561,6 +4709,10 @@ def test_gaze_wam_inference_adapter_history_mask_and_absolute_output():
         num_inference_steps=2,
         input_pertub=0.0,
         heatmap_num_tokens=8,
+        heatmap_token_grid=(2, 4),
+        heatmap_image_size=(16, 16),
+        heatmap_cosmos_encoder_path=encoder_path,
+        heatmap_cosmos_decoder_path=decoder_path,
         n_emb=32,
     )
     normalizer = LinearNormalizer()
@@ -4676,7 +4828,7 @@ def test_gaze_wam_action_base_abs_to_10d_requires_gripper_for_pose_only_base():
         raise AssertionError("Expected invalid action_base_abs dim to fail.")
 
 
-def test_gaze_wam_inference_adapter_rejects_nonfinite_inputs():
+def test_gaze_wam_inference_adapter_rejects_nonfinite_inputs(tmp_path):
     torch.manual_seed(33)
     shape_meta = {
         "obs": {
@@ -4691,6 +4843,12 @@ def test_gaze_wam_inference_adapter_rejects_nonfinite_inputs():
             "horizon": 4,
         },
     }
+    encoder_path, decoder_path = _write_fake_cosmos_jit_pair(
+        tmp_path,
+        image_size=(16, 16),
+        token_grid=(2, 4),
+        latent_channels=1,
+    )
     policy = GazeWamPolicy(
         shape_meta=shape_meta,
         noise_scheduler=DDPMScheduler(
@@ -4715,6 +4873,10 @@ def test_gaze_wam_inference_adapter_rejects_nonfinite_inputs():
         num_inference_steps=2,
         input_pertub=0.0,
         heatmap_num_tokens=8,
+        heatmap_token_grid=(2, 4),
+        heatmap_image_size=(16, 16),
+        heatmap_cosmos_encoder_path=encoder_path,
+        heatmap_cosmos_decoder_path=decoder_path,
         n_emb=32,
     )
     normalizer = LinearNormalizer()
@@ -4773,7 +4935,7 @@ def test_gaze_wam_inference_adapter_rejects_nonfinite_inputs():
         raise AssertionError("Expected non-finite gripper_width to fail.")
 
 
-def test_gaze_wam_inference_adapter_validates_geometry_contract():
+def test_gaze_wam_inference_adapter_validates_geometry_contract(tmp_path):
     torch.manual_seed(34)
     shape_meta = {
         "obs": {
@@ -4788,6 +4950,12 @@ def test_gaze_wam_inference_adapter_validates_geometry_contract():
             "horizon": 4,
         },
     }
+    encoder_path, decoder_path = _write_fake_cosmos_jit_pair(
+        tmp_path,
+        image_size=(16, 16),
+        token_grid=(2, 4),
+        latent_channels=1,
+    )
     policy = GazeWamPolicy(
         shape_meta=shape_meta,
         noise_scheduler=DDPMScheduler(
@@ -4812,6 +4980,10 @@ def test_gaze_wam_inference_adapter_validates_geometry_contract():
         num_inference_steps=2,
         input_pertub=0.0,
         heatmap_num_tokens=8,
+        heatmap_token_grid=(2, 4),
+        heatmap_image_size=(16, 16),
+        heatmap_cosmos_encoder_path=encoder_path,
+        heatmap_cosmos_decoder_path=decoder_path,
         n_emb=32,
     )
     normalizer = LinearNormalizer()
@@ -5372,7 +5544,7 @@ def test_gaze_wam_jsonl_state_provider_reads_base_and_tcp_rows():
         rows = [
             {"state": {"base": [0, 1, 2, 1, 0, 0, 0, 1, 0, 0.03]}},
             {"tcp_pose_6d": [0.1, 0.2, 0.3, 0, 0, 0], "gripper_width": 0.04},
-            {"action_base_abs": [0, 1, 2, 1, 0, 0, 0, 1, 0], "gripper_width": 0.05},
+            {"state": {"base": [0, 1, 2, 1, 0, 0, 0, 1, 0]}, "gripper_width": 0.05},
         ]
         state_path.write_text(
             "\n".join(json.dumps(row) for row in rows) + "\n",
@@ -5394,7 +5566,7 @@ def test_gaze_wam_jsonl_state_provider_reads_base_and_tcp_rows():
         assert state0.tcp_pose is None
         assert np.allclose(np.asarray(state1.tcp_pose), rows[1]["tcp_pose_6d"])
         assert np.isclose(state1.gripper_width, 0.04)
-        assert np.allclose(np.asarray(state2.action_base_abs), rows[2]["action_base_abs"])
+        assert np.allclose(np.asarray(state2.action_base_abs), rows[2]["state"]["base"])
         assert np.isclose(state2.gripper_width, 0.05)
         assert state3 is state2
         provider.reset()
@@ -5869,7 +6041,7 @@ def test_gaze_wam_config_split_deployment_rehearsal_smoke():
             output_dir=str(data_dir),
             num_episodes=1,
             episode_length=18,
-            image_size=16,
+            image_size=256,
             seed=7,
         )
         video_path = root / "camera.mp4"
@@ -6011,7 +6183,7 @@ def test_gaze_wam_zarr_replay_rejects_multi_column_gripper():
             raise AssertionError("Expected zarr replay with multi-column gripper_width to fail.")
 
 
-def test_gaze_wam_zarr_replay_accepts_null_gaze_key_with_heatmap_validation():
+def test_gaze_wam_zarr_replay_allows_null_gaze_but_training_validation_rejects_it():
     with tempfile.TemporaryDirectory() as tmpdir:
         robot_path = _write_robot_heatmap_only_zarr(Path(tmpdir) / "robot_heatmap.zarr")
 
@@ -6022,17 +6194,16 @@ def test_gaze_wam_zarr_replay_accepts_null_gaze_key_with_heatmap_validation():
         )
         assert source.get_gaze() is None
 
-        summary = _validate_rehearsal_robot_zarr(
-            dataset_path=str(robot_path),
-            gaze_key=None,
-            heatmap_key="gaze_heatmap",
-            n_obs_steps=2,
-            action_horizon=3,
-            image_size=(16, 16),
-            heatmap_token_grid=(4, 4),
-        )
-        assert summary["valid"] is True
-        assert summary["sample"]["has_gaze_label"] is False
+        with pytest.raises(ValueError, match="normalized point gaze key"):
+            _validate_rehearsal_robot_zarr(
+                dataset_path=str(robot_path),
+                gaze_key=None,
+                heatmap_key="gaze_heatmap",
+                n_obs_steps=2,
+                action_horizon=3,
+                image_size=(16, 16),
+                heatmap_token_grid=(4, 4),
+            )
 
 
 def test_gaze_wam_zarr_deployment_rehearsal_records_json_and_missing_gaze():
@@ -6344,7 +6515,7 @@ def test_gaze_wam_config_split_rehearsal_validates_normalizer_zarr_timestamps():
             raise AssertionError("Expected timestamp validation to block split rehearsal.")
 
 
-def test_gaze_wam_policy_gaze_dependency_ratio():
+def test_gaze_wam_policy_gaze_dependency_ratio(tmp_path):
     torch.manual_seed(4)
     shape_meta = {
         "action": {
@@ -6356,6 +6527,12 @@ def test_gaze_wam_policy_gaze_dependency_ratio():
         num_train_timesteps=10,
         beta_schedule="squaredcos_cap_v2",
         prediction_type="epsilon",
+    )
+    encoder_path, decoder_path = _write_fake_cosmos_jit_pair(
+        tmp_path,
+        image_size=(16, 16),
+        token_grid=(2, 4),
+        latent_channels=1,
     )
     policy = GazeWamPolicy(
         shape_meta=shape_meta,
@@ -6377,6 +6554,10 @@ def test_gaze_wam_policy_gaze_dependency_ratio():
         num_inference_steps=2,
         input_pertub=0.0,
         heatmap_num_tokens=8,
+        heatmap_token_grid=(2, 4),
+        heatmap_image_size=(16, 16),
+        heatmap_cosmos_encoder_path=encoder_path,
+        heatmap_cosmos_decoder_path=decoder_path,
         n_emb=32,
     )
     normalizer = LinearNormalizer()
@@ -6493,7 +6674,7 @@ def test_gaze_wam_policy_gaze_dependency_ratio():
         raise AssertionError("Expected out-of-range GDR timestep to fail.")
 
 
-def test_gaze_wam_policy_predict_heatmap_visualization():
+def test_gaze_wam_policy_predict_heatmap_visualization(tmp_path):
     torch.manual_seed(5)
     shape_meta = {
         "action": {
@@ -6505,6 +6686,12 @@ def test_gaze_wam_policy_predict_heatmap_visualization():
         num_train_timesteps=10,
         beta_schedule="squaredcos_cap_v2",
         prediction_type="epsilon",
+    )
+    encoder_path, decoder_path = _write_fake_cosmos_jit_pair(
+        tmp_path,
+        image_size=(16, 32),
+        token_grid=(2, 4),
+        latent_channels=1,
     )
     policy = GazeWamPolicy(
         shape_meta=shape_meta,
@@ -6528,6 +6715,8 @@ def test_gaze_wam_policy_predict_heatmap_visualization():
         heatmap_num_tokens=8,
         heatmap_token_grid=(2, 4),
         heatmap_image_size=(16, 32),
+        heatmap_cosmos_encoder_path=encoder_path,
+        heatmap_cosmos_decoder_path=decoder_path,
         n_emb=32,
     )
     normalizer = LinearNormalizer()
@@ -6662,8 +6851,8 @@ def test_gaze_wam_mixed_batch_builder_masks_and_placeholders():
     assert no_dropout["action"].shape == (4, 4, 10)
     assert no_dropout["action_abs"].shape == (4, 4, 10)
     assert no_dropout["action_base_abs"].shape == (4, 10)
-    assert no_dropout["has_action_abs"].tolist() == [True, True, True, False]
-    assert no_dropout["has_action_base_abs"].tolist() == [True, True, True, False]
+    assert no_dropout["has_action_abs"].tolist() == [True, False, True, False]
+    assert no_dropout["has_action_base_abs"].tolist() == [False, True, True, False]
     assert no_dropout["heatmap_image"].shape == (4, 1, 16, 16)
     assert no_dropout["has_heatmap_image"].tolist() == [False, False, False, True]
     assert torch.allclose(no_dropout["action"][3], torch.zeros_like(no_dropout["action"][3]))
@@ -6953,13 +7142,10 @@ def test_gaze_wam_mixed_batch_builder_robot_only_baseline():
     assert torch.allclose(batch["heatmap"], torch.zeros_like(batch["heatmap"]))
     assert batch["use_gaze_condition"].tolist() == [True, True, True]
     assert batch["is_gaze_condition_dropped"].tolist() == [False, False, False]
-    assert batch["has_action_abs"].tolist() == [True, False, True]
-    assert batch["has_action_base_abs"].tolist() == [False, True, True]
-    assert torch.allclose(batch["action_abs"][1], torch.zeros_like(batch["action_abs"][1]))
-    assert torch.allclose(
-        batch["action_base_abs"][0],
-        torch.zeros_like(batch["action_base_abs"][0]),
-    )
+    assert batch["has_action_abs"].tolist() == [True, True, True]
+    assert batch["has_action_base_abs"].tolist() == [True, True, True]
+    assert torch.allclose(batch["action_abs"], robot_batch["action_abs"])
+    assert torch.allclose(batch["action_base_abs"], robot_batch["action_base_abs"])
 
 
 def test_gaze_wam_mixed_batch_builder_missing_robot_gaze_trains_heatmap_under_mask():
@@ -7602,8 +7788,9 @@ def test_gaze_wam_dataset_normalizes_string_bool_config():
         robot_path = _write_gaze_wam_zarr(
             Path(tmpdir) / "robot.zarr",
             include_action=True,
-            gaze=pixel_gaze,
         )
+        robot_data = zarr.open(str(robot_path), mode="a")["data"]
+        _replace_zarr_array(robot_data, "gaze_xy", pixel_gaze)
 
         dataset = GazeWamRobotDataset(
             dataset_path=str(robot_path),
@@ -8222,16 +8409,18 @@ def test_gaze_wam_dataset_rejects_invalid_temporal_parameters():
             ("image_size", {"image_size": (0, 16)}, "positive integer"),
             ("heatmap_token_grid", {"heatmap_token_grid": (0, 4)}, "positive integer"),
         ]
+        base_kwargs = {
+            "dataset_path": str(robot_path),
+            "n_obs_steps": 2,
+            "action_horizon": 3,
+            "image_size": (16, 16),
+            "heatmap_token_grid": (4, 4),
+        }
         for name, overrides, expected in bad_cases:
             try:
-                GazeWamRobotDataset(
-                    dataset_path=str(robot_path),
-                    n_obs_steps=2,
-                    action_horizon=3,
-                    image_size=(16, 16),
-                    heatmap_token_grid=(4, 4),
-                    **overrides,
-                )
+                kwargs = dict(base_kwargs)
+                kwargs.update(overrides)
+                GazeWamRobotDataset(**kwargs)
             except ValueError as exc:
                 assert name in str(exc)
                 assert expected in str(exc)
@@ -8270,7 +8459,10 @@ def test_gaze_wam_dataset_rejects_invalid_temporal_parameters():
 def test_gaze_wam_dataset_requires_point_gaze_key_with_dense_heatmap():
     with tempfile.TemporaryDirectory() as tmpdir:
         robot_path = _write_robot_heatmap_only_zarr(Path(tmpdir) / "robot_heatmap.zarr")
-        open_path = _write_open_heatmap_only_zarr(Path(tmpdir) / "open_heatmap.zarr")
+        open_path = _write_gaze_wam_zarr(
+            Path(tmpdir) / "open_point.zarr",
+            include_action=False,
+        )
 
         assert as_optional_gaze_wam_key(None) is None
         assert as_optional_gaze_wam_key("") is None
@@ -8299,7 +8491,7 @@ def test_gaze_wam_dataset_requires_point_gaze_key_with_dense_heatmap():
 
         try:
             GazeWamOpenDataset(
-                dataset_path=str(open_path),
+                dataset_path=str(robot_path),
                 gaze_key="gaze_xy",
                 heatmap_key="gaze_heatmap",
                 n_obs_steps=2,
@@ -8378,18 +8570,20 @@ def test_gaze_wam_zarr_dataset_emits_optional_presence_masks():
         assert robot_sample["has_action_abs"].item() is False
         assert robot_sample["has_action_base_abs"].item() is False
 
-        open_path = _write_open_heatmap_only_zarr(Path(tmpdir) / "open_heatmap.zarr")
+        open_path = _write_gaze_wam_zarr(
+            Path(tmpdir) / "open_point.zarr",
+            include_action=False,
+        )
         open_data = zarr.open(str(open_path), mode="a")["data"]
         has_heatmap_image = np.asarray([1, 0, 1, 1, 1, 1], dtype=np.uint8)
-        open_data.array(
+        _replace_zarr_array(
+            open_data,
             "has_heatmap_image",
             has_heatmap_image[:, None],
-            shape=(has_heatmap_image.shape[0], 1),
-            dtype=has_heatmap_image.dtype,
         )
         open_dataset = GazeWamOpenDataset(
             dataset_path=str(open_path),
-            gaze_key=None,
+            gaze_key="gaze_xy",
             heatmap_key="gaze_heatmap",
             n_obs_steps=2,
             action_horizon=3,
@@ -8406,7 +8600,10 @@ def test_validate_gaze_wam_zarr_robot_open_and_missing_key():
     with tempfile.TemporaryDirectory() as tmpdir:
         robot_path = _write_gaze_wam_zarr(Path(tmpdir) / "robot.zarr", include_action=True)
         robot_heatmap_path = _write_robot_heatmap_only_zarr(Path(tmpdir) / "robot_heatmap.zarr")
-        open_path = _write_open_heatmap_only_zarr(Path(tmpdir) / "open.zarr")
+        open_path = _write_gaze_wam_zarr(
+            Path(tmpdir) / "open_point.zarr",
+            include_action=False,
+        )
 
         robot_summary = validate_gaze_wam_zarr(
             dataset_path=str(robot_path),
@@ -8429,7 +8626,7 @@ def test_validate_gaze_wam_zarr_robot_open_and_missing_key():
         open_summary = validate_gaze_wam_zarr(
             dataset_path=str(open_path),
             dataset_type="open",
-            gaze_key="missing_gaze_xy",
+            gaze_key="gaze_xy",
             heatmap_key="gaze_heatmap",
             n_obs_steps=2,
             action_horizon=3,
@@ -8455,25 +8652,21 @@ def test_validate_gaze_wam_zarr_robot_open_and_missing_key():
         )
         assert robot_summary["robot_numeric"]["action_abs"]["shape"] == [6, 10]
         assert robot_summary["robot_numeric"]["gripper"]["finite"] is True
-        assert robot_heatmap_summary["valid"] is True
-        assert robot_heatmap_summary["sample"]["has_gaze_label"] is False
-        assert robot_heatmap_summary["sample"]["use_gaze_condition"] is False
-        assert robot_heatmap_summary["sample"]["is_gaze_condition_dropped"] is True
-        assert robot_heatmap_summary["sample"]["heatmap_shape"] == [1, 16, 1]
-        assert robot_heatmap_summary["sample"]["action_shape"] == [3, 10]
-        assert "action_roundtrip_max_error" in robot_heatmap_summary["sample"]
-        assert robot_heatmap_summary["robot_numeric"]["heatmap"]["shape"] == [6, 32, 32]
-        assert robot_heatmap_summary["robot_numeric"]["heatmap"]["finite"] is True
+        assert robot_heatmap_summary["valid"] is False
+        assert any(
+            "normalized point gaze key" in message
+            for message in robot_heatmap_summary["errors"]
+        )
         assert open_summary["valid"] is True
         assert open_summary["image_resize_mode"] == "stretch"
-        assert open_summary["sample"]["has_gaze_label"] is False
+        assert open_summary["sample"]["has_gaze_label"] is True
         assert open_summary["sample"]["use_gaze_condition"] is False
         assert open_summary["sample"]["is_gaze_condition_dropped"] is True
-        assert open_summary["sample"]["heatmap_shape"] == [1, 16, 1]
+        assert open_summary["sample"]["heatmap_shape"] == [1, 16, 16]
         assert open_summary["sample"]["heatmap_image_shape"] == [1, 16, 16]
-        assert open_summary["image"]["range_kind"] == "float_0_1_like"
-        assert open_summary["image"]["max"] == 0.0
-        assert open_summary["heatmap"]["shape"] == [6, 32, 32]
+        assert open_summary["image"]["range_kind"] == "uint8_0_255_like"
+        assert open_summary["image"]["max"] == 50.0
+        assert open_summary["heatmap"]["shape"] == [6, 16, 16]
         assert open_summary["heatmap"]["finite"] is True
 
         broken_path = Path(tmpdir) / "broken_robot.zarr"
@@ -8498,6 +8691,7 @@ def test_validate_gaze_wam_zarr_robot_open_and_missing_key():
             action_horizon=3,
             image_size=(16, 16),
             heatmap_token_grid=(4, 4),
+            heatmap_key="gaze_heatmap",
             check_dataset_sample=False,
         )
         assert broken_summary["valid"] is False
@@ -8572,6 +8766,7 @@ def test_validate_gaze_wam_zarr_checks_optional_presence_masks():
             action_horizon=3,
             image_size=(16, 16),
             heatmap_token_grid=(4, 4),
+            heatmap_key="gaze_heatmap",
             check_dataset_sample=False,
         )
 
@@ -8588,6 +8783,7 @@ def test_validate_gaze_wam_zarr_checks_optional_presence_masks():
             action_horizon=3,
             image_size=(16, 16),
             heatmap_token_grid=(4, 4),
+            heatmap_key="gaze_heatmap",
             sample_index=1,
             check_dataset_sample=True,
         )
@@ -8606,24 +8802,27 @@ def test_validate_gaze_wam_zarr_checks_optional_presence_masks():
             action_horizon=3,
             image_size=(16, 16),
             heatmap_token_grid=(4, 4),
+            heatmap_key="gaze_heatmap",
             check_dataset_sample=False,
         )
         assert bad_value["valid"] is False
         assert any("has_action_base_abs" in message and "0/1" in message for message in bad_value["errors"])
 
-        open_path = _write_open_heatmap_only_zarr(Path(tmpdir) / "open.zarr")
+        open_path = _write_gaze_wam_zarr(
+            Path(tmpdir) / "open_point.zarr",
+            include_action=False,
+        )
         open_data = zarr.open(str(open_path), mode="a")["data"]
         bad_shape = np.ones((6, 2), dtype=np.uint8)
-        open_data.array(
+        _replace_zarr_array(
+            open_data,
             "has_heatmap_image",
             bad_shape,
-            shape=bad_shape.shape,
-            dtype=bad_shape.dtype,
         )
         bad_shape_summary = validate_gaze_wam_zarr(
             dataset_path=str(open_path),
             dataset_type="open",
-            gaze_key="missing_gaze_xy",
+            gaze_key="gaze_xy",
             heatmap_key="gaze_heatmap",
             n_obs_steps=2,
             action_horizon=3,
@@ -8645,7 +8844,7 @@ def test_validate_gaze_wam_zarr_checks_optional_presence_masks():
         open_sample_summary = validate_gaze_wam_zarr(
             dataset_path=str(open_path),
             dataset_type="open",
-            gaze_key="missing_gaze_xy",
+            gaze_key="gaze_xy",
             heatmap_key="gaze_heatmap",
             n_obs_steps=2,
             action_horizon=3,
@@ -8664,11 +8863,10 @@ def test_validate_gaze_wam_zarr_checks_optional_presence_masks():
         )
         no_heatmap_data = zarr.open(str(no_heatmap_path), mode="a")["data"]
         false_gaze_mask = np.asarray([1, 0, 1, 1, 1, 1], dtype=np.uint8)
-        no_heatmap_data.array(
+        _replace_zarr_array(
+            no_heatmap_data,
             "has_gaze_label",
             false_gaze_mask,
-            shape=false_gaze_mask.shape,
-            dtype=false_gaze_mask.dtype,
         )
         no_heatmap_summary = validate_gaze_wam_zarr(
             dataset_path=str(no_heatmap_path),
@@ -8688,11 +8886,10 @@ def test_validate_gaze_wam_zarr_checks_optional_presence_masks():
         no_point_path = _write_open_heatmap_only_zarr(Path(tmpdir) / "heatmap_with_true_mask.zarr")
         no_point_data = zarr.open(str(no_point_path), mode="a")["data"]
         true_gaze_mask = np.asarray([0, 1, 0, 0, 0, 0], dtype=np.uint8)
-        no_point_data.array(
+        _replace_zarr_array(
+            no_point_data,
             "has_gaze_label",
             true_gaze_mask,
-            shape=true_gaze_mask.shape,
-            dtype=true_gaze_mask.dtype,
         )
         no_point_summary = validate_gaze_wam_zarr(
             dataset_path=str(no_point_path),
@@ -8714,12 +8911,15 @@ def test_validate_gaze_wam_zarr_checks_optional_presence_masks():
 
 def test_gaze_wam_open_dataset_rejects_nonpositive_action_dim():
     with tempfile.TemporaryDirectory() as tmpdir:
-        open_path = _write_open_heatmap_only_zarr(Path(tmpdir) / "open.zarr")
+        open_path = _write_gaze_wam_zarr(
+            Path(tmpdir) / "open_point.zarr",
+            include_action=False,
+        )
 
         summary = validate_gaze_wam_zarr(
             dataset_path=str(open_path),
             dataset_type="open",
-            gaze_key="missing_gaze_xy",
+            gaze_key="gaze_xy",
             heatmap_key="gaze_heatmap",
             n_obs_steps=2,
             action_horizon=3,
@@ -8734,7 +8934,7 @@ def test_gaze_wam_open_dataset_rejects_nonpositive_action_dim():
         try:
             GazeWamOpenDataset(
                 dataset_path=str(open_path),
-                gaze_key="missing_gaze_xy",
+                gaze_key="gaze_xy",
                 heatmap_key="gaze_heatmap",
                 n_obs_steps=2,
                 action_horizon=3,
@@ -9044,13 +9244,16 @@ def test_gaze_wam_dataset_rejects_nonfinite_actions_and_negative_heatmap_on_samp
         else:
             raise AssertionError("Expected robot dataset sample to reject non-finite action_abs.")
 
-        open_path = _write_open_heatmap_only_zarr(root / "open_heatmap.zarr")
+        open_path = _write_gaze_wam_zarr(
+            root / "open_heatmap.zarr",
+            include_action=False,
+        )
         open_root = zarr.open(str(open_path), mode="a")
         open_root["data/gaze_heatmap"][1, 2, 3] = -1.0
 
         open_dataset = GazeWamOpenDataset(
             dataset_path=str(open_path),
-            gaze_key="missing_gaze_xy",
+            gaze_key="gaze_xy",
             heatmap_key="gaze_heatmap",
             n_obs_steps=2,
             action_horizon=3,
@@ -9136,22 +9339,12 @@ def test_inspect_gaze_wam_zarr_suggests_robot_heatmap_only_key_mapping():
         assert summary["guessed_dataset_type"] == "robot"
         assert summary["suggestions"]["gaze"] == []
         assert summary["suggestions"]["heatmap"][0]["key"] == "eye_gaze_heatmap"
-        assert summary["mapping_status"]["ready_for_robot_canonicalization"] is True
+        assert summary["mapping_status"]["ready_for_robot_canonicalization"] is False
+        assert summary["mapping_status"]["missing_required_roles"] == ["gaze"]
         assert summary["mapping_status"]["has_dense_heatmap"] is True
-        assert summary["canonicalizer_args"] == [
-            "--camera-key",
-            "front_rgb",
-            "--action-key",
-            "future_tcp_pose",
-            "--tcp-pose-key",
-            "current_tcp_pose",
-            "--gripper-key",
-            "jaw_width",
-            "--heatmap-key",
-            "eye_gaze_heatmap",
-            "--timestamp-key",
-            "sensor_time",
-        ]
+        assert summary["canonicalizer_args"] is None
+        assert summary["canonicalizer_command_template"] is None
+        assert any("infer all robot canonicalizer keys" in item for item in summary["warnings"])
 
 
 def test_preview_gaze_wam_dataset_writes_robot_overlay_files():
@@ -9193,7 +9386,17 @@ def test_preview_gaze_wam_dataset_writes_robot_overlay_files():
 
 def test_preview_gaze_wam_dataset_writes_open_dense_heatmap_preview():
     with tempfile.TemporaryDirectory() as tmpdir:
-        open_path = _write_open_heatmap_only_zarr(Path(tmpdir) / "open.zarr")
+        open_path = _write_gaze_wam_zarr(
+            Path(tmpdir) / "open.zarr",
+            include_action=False,
+            image_hw=(32, 32),
+        )
+        open_data = zarr.open(str(open_path), mode="a")["data"]
+        _replace_zarr_array(
+            open_data,
+            "has_gaze_label",
+            np.zeros(6, dtype=np.bool_),
+        )
         output_dir = Path(tmpdir) / "preview_open"
 
         summary = preview_gaze_wam_dataset(
@@ -9201,7 +9404,7 @@ def test_preview_gaze_wam_dataset_writes_open_dense_heatmap_preview():
             dataset_type="open",
             output_dir=str(output_dir),
             sample_index=2,
-            gaze_key=None,
+            gaze_key="gaze_xy",
             heatmap_key="gaze_heatmap",
             n_obs_steps=2,
             action_horizon=3,
@@ -9225,7 +9428,10 @@ def test_preview_gaze_wam_dataset_writes_open_dense_heatmap_preview():
 
 def test_canonicalize_robot_gaze_wam_zarr_key_mapping_and_pixel_gaze():
     with tempfile.TemporaryDirectory() as tmpdir:
-        raw_path = _write_noncanonical_robot_zarr(Path(tmpdir) / "raw_robot.zarr")
+        raw_path = _write_noncanonical_robot_zarr(
+            Path(tmpdir) / "raw_robot.zarr",
+            image_hw=(16, 16),
+        )
         raw_data = zarr.open(str(raw_path), mode="a")["data"]
         has_action_abs = np.asarray([1, 1, 0, 1, 1, 1], dtype=np.uint8)
         has_action_base_abs = np.asarray([1, 0, 1, 1, 1, 1], dtype=np.uint8)
@@ -9272,12 +9478,14 @@ def test_canonicalize_robot_gaze_wam_zarr_key_mapping_and_pixel_gaze():
             "action_abs_tcp",
             "action_timestamp",
             "camera0_rgb",
+            "gaze_heatmap",
             "gaze_timestamp",
             "gaze_xy",
             "gripper_width",
             "has_action_abs",
             "has_action_base_abs",
             "has_gaze_label",
+            "has_heatmap_image",
             "image_timestamp",
             "robot_state_timestamp",
             "tcp_pose_abs",
@@ -9287,6 +9495,7 @@ def test_canonicalize_robot_gaze_wam_zarr_key_mapping_and_pixel_gaze():
             "has_action_abs",
             "has_action_base_abs",
             "has_gaze_label",
+            "has_heatmap_image",
         ]
         assert summary["validation"]["presence_masks"]["has_action_abs"]["true_count"] == 5
         assert summary["validation"]["presence_masks"]["has_action_base_abs"]["false_count"] == 1
@@ -9346,96 +9555,40 @@ def test_canonicalize_robot_gaze_wam_zarr_key_mapping_and_pixel_gaze():
         assert sample["has_action_base_abs"].item() is False
 
 
-def test_canonicalize_robot_gaze_wam_zarr_accepts_dense_heatmap_without_gaze_point():
+def test_canonicalize_robot_gaze_wam_zarr_rejects_dense_heatmap_without_gaze_point():
     with tempfile.TemporaryDirectory() as tmpdir:
         raw_path = _write_noncanonical_robot_heatmap_only_zarr(Path(tmpdir) / "raw_robot.zarr")
-        raw_data = zarr.open(str(raw_path), mode="a")["data"]
-        has_gaze_label = np.zeros(6, dtype=np.uint8)
-        raw_data.array(
-            "has_gaze_label",
-            has_gaze_label,
-            shape=has_gaze_label.shape,
-            dtype=has_gaze_label.dtype,
-        )
-        canonical_path = Path(tmpdir) / "canonical_robot.zarr"
-
-        summary = canonicalize_robot_gaze_wam_zarr(
-            input_path=str(raw_path),
-            output_path=str(canonical_path),
-            camera_key="front_rgb",
-            action_key="future_tcp_pose",
-            tcp_pose_key="current_tcp_pose",
-            gripper_key="jaw_width",
-            gaze_key="missing_eye_pixel_xy",
-            heatmap_key="eye_gaze_heatmap",
-            timestamp_key="sensor_time",
-            overwrite=True,
-        )
-
-        assert summary["validated"] is True
-        assert summary["dataset_type"] == "robot"
-        assert summary["output_gaze_key"] is None
-        assert summary["output_heatmap_key"] == "gaze_heatmap"
-        assert "gaze_xy" not in summary["keys"]
-        assert "gaze_heatmap" in summary["keys"]
-        assert summary["presence_mask_keys"] == ["has_gaze_label"]
-        root = zarr.open(str(canonical_path), mode="r")
-        assert root["meta"].attrs["dataset_type"] == "robot"
-        assert root["meta"].attrs["image_size"] == [16, 16]
-        assert root["meta"].attrs["image_resize_mode"] == "stretch"
-        assert "gaze_xy" not in root["data"]
-        assert root["data/gaze_heatmap"].shape == (6, 20, 40)
-        assert root["data/has_gaze_label"][:].tolist() == [0, 0, 0, 0, 0, 0]
-        assert summary["validation"]["metadata_attrs"]["dataset_type"] == "robot"
-        assert summary["validation"]["metadata_attrs"]["image_size"] == [16, 16]
-        assert summary["validation"]["metadata_attrs"]["image_resize_mode"] == "stretch"
-        assert summary["validation"]["sample"]["has_gaze_label"] is False
-        assert summary["validation"]["robot_numeric"]["heatmap"]["shape"] == [6, 20, 40]
-
-        dataset = GazeWamRobotDataset(
-            dataset_path=str(canonical_path),
-            gaze_key="missing_gaze_xy",
-            heatmap_key="gaze_heatmap",
-            n_obs_steps=2,
-            action_horizon=3,
-            image_size=(16, 16),
-            heatmap_token_grid=(4, 4),
-            action_padding=True,
-        )
-        sample = dataset[0]
-        assert sample["has_gaze_label"].item() is False
-        assert torch.allclose(sample["gaze_xy"], torch.zeros(2))
-        assert sample["heatmap"].shape == (1, 16, 1)
-        assert sample["heatmap"].max() > 0
-        assert sample["action"].shape == (3, 10)
+        with pytest.raises(KeyError, match="point gaze key"):
+            canonicalize_robot_gaze_wam_zarr(
+                input_path=str(raw_path),
+                output_path=str(Path(tmpdir) / "canonical_robot.zarr"),
+                camera_key="front_rgb",
+                action_key="future_tcp_pose",
+                tcp_pose_key="current_tcp_pose",
+                gripper_key="jaw_width",
+                gaze_key="missing_eye_pixel_xy",
+                heatmap_key="eye_gaze_heatmap",
+                timestamp_key="sensor_time",
+                overwrite=True,
+            )
 
 
-def test_canonicalize_robot_gaze_wam_zarr_accepts_null_like_gaze_key():
+def test_canonicalize_robot_gaze_wam_zarr_rejects_null_like_gaze_key():
     with tempfile.TemporaryDirectory() as tmpdir:
         raw_path = _write_noncanonical_robot_heatmap_only_zarr(Path(tmpdir) / "raw_robot.zarr")
-        canonical_path = Path(tmpdir) / "canonical_robot.zarr"
-
-        summary = canonicalize_robot_gaze_wam_zarr(
-            input_path=str(raw_path),
-            output_path=str(canonical_path),
-            camera_key="front_rgb",
-            action_key="future_tcp_pose",
-            tcp_pose_key="current_tcp_pose",
-            gripper_key="jaw_width",
-            gaze_key="null",
-            heatmap_key="eye_gaze_heatmap",
-            timestamp_key="None",
-            overwrite=True,
-        )
-
-        assert summary["validated"] is True
-        assert summary["output_gaze_key"] is None
-        assert summary["output_heatmap_key"] == "gaze_heatmap"
-        assert summary["timestamp_key"] is None
-        assert summary["validation"]["sample"]["has_gaze_label"] is False
-        root = zarr.open(str(canonical_path), mode="r")
-        assert "gaze_xy" not in root["data"]
-        assert "timestamp" not in root["data"]
+        with pytest.raises(KeyError, match="point gaze key"):
+            canonicalize_robot_gaze_wam_zarr(
+                input_path=str(raw_path),
+                output_path=str(Path(tmpdir) / "canonical_robot.zarr"),
+                camera_key="front_rgb",
+                action_key="future_tcp_pose",
+                tcp_pose_key="current_tcp_pose",
+                gripper_key="jaw_width",
+                gaze_key="null",
+                heatmap_key="eye_gaze_heatmap",
+                timestamp_key="None",
+                overwrite=True,
+            )
 
 
 def test_canonicalize_robot_gaze_wam_zarr_rejects_out_of_bounds_gaze_by_default():
@@ -9624,7 +9777,7 @@ def test_prepare_robot_gaze_wam_zarr_pipeline_autoinfers_and_previews():
             overwrite=True,
             n_obs_steps=2,
             action_horizon=3,
-            image_size=(16, 16),
+            image_size=(20, 40),
             heatmap_token_grid=(4, 4),
         )
 
@@ -9648,7 +9801,11 @@ def test_prepare_robot_gaze_wam_zarr_pipeline_autoinfers_and_previews():
         assert str(canonical_path) in summary["canonicalizer_command"]
         assert "--no-gaze-is-normalized" in summary["canonicalizer_command"]
         assert summary["validation"]["valid"] is True
-        assert summary["canonicalize"]["presence_mask_keys"] == ["has_action_abs"]
+        assert summary["canonicalize"]["presence_mask_keys"] == [
+            "has_action_abs",
+            "has_gaze_label",
+            "has_heatmap_image",
+        ]
         assert summary["validation"]["presence_masks"]["has_action_abs"]["false_count"] == 1
         assert sorted(summary["validation"]["timestamps"]["keys"]) == [
             "action_timestamp",
@@ -9720,64 +9877,41 @@ def test_prepare_robot_gaze_wam_zarr_dry_run_resolves_keys_without_writing_outpu
         assert payload["key_map"] == summary["key_map"]
 
 
-def test_prepare_robot_gaze_wam_zarr_autoinfers_dense_heatmap_without_gaze_point():
+def test_prepare_robot_gaze_wam_zarr_rejects_dense_heatmap_without_gaze_point():
     with tempfile.TemporaryDirectory() as tmpdir:
         root = Path(tmpdir)
         raw_path = _write_noncanonical_robot_heatmap_only_zarr(root / "raw_robot.zarr")
-        canonical_path = root / "prepared_robot.zarr"
-        preview_dir = root / "prepared_preview"
-
-        summary = prepare_robot_gaze_wam_zarr(
-            input_path=str(raw_path),
-            output_path=str(canonical_path),
-            preview_dir=str(preview_dir),
-            overwrite=True,
-            n_obs_steps=2,
-            action_horizon=3,
-            image_size=(16, 16),
-            heatmap_token_grid=(4, 4),
-        )
-
-        assert summary["ok"] is True
-        assert summary["key_map"]["gaze_key"] is None
-        assert summary["key_map"]["heatmap_key"] == "eye_gaze_heatmap"
-        assert summary["canonicalize"]["output_gaze_key"] is None
-        assert summary["canonicalize"]["output_heatmap_key"] == "gaze_heatmap"
-        assert summary["validation"]["valid"] is True
-        assert summary["validation"]["sample"]["has_gaze_label"] is False
-        assert summary["preview"]["has_gaze_label"] is False
-        assert Path(summary["preview"]["paths"]["overlay"]).exists()
-        prepared = zarr.open(str(canonical_path), mode="r")
-        assert "gaze_xy" not in prepared["data"]
-        assert prepared["data/gaze_heatmap"].shape == (6, 20, 40)
+        with pytest.raises(ValueError, match="required robot point gaze key"):
+            prepare_robot_gaze_wam_zarr(
+                input_path=str(raw_path),
+                output_path=str(root / "prepared_robot.zarr"),
+                preview_dir=str(root / "prepared_preview"),
+                overwrite=True,
+                n_obs_steps=2,
+                action_horizon=3,
+                image_size=(16, 16),
+                heatmap_token_grid=(4, 4),
+            )
 
 
-def test_prepare_robot_gaze_wam_zarr_accepts_null_like_explicit_gaze_key():
+def test_prepare_robot_gaze_wam_zarr_rejects_null_like_explicit_gaze_key():
     with tempfile.TemporaryDirectory() as tmpdir:
         root = Path(tmpdir)
         raw_path = _write_noncanonical_robot_heatmap_only_zarr(root / "raw_robot.zarr")
-        canonical_path = root / "prepared_robot.zarr"
-
-        summary = prepare_robot_gaze_wam_zarr(
-            input_path=str(raw_path),
-            output_path=str(canonical_path),
-            gaze_key="None",
-            heatmap_key="eye_gaze_heatmap",
-            timestamp_key="null",
-            overwrite=True,
-            n_obs_steps=2,
-            action_horizon=3,
-            image_size=(16, 16),
-            heatmap_token_grid=(4, 4),
-            skip_preview=True,
-        )
-
-        assert summary["ok"] is True
-        assert summary["key_map"]["gaze_key"] is None
-        assert summary["key_map"]["heatmap_key"] == "eye_gaze_heatmap"
-        assert summary["key_map"]["timestamp_key"] is None
-        assert summary["canonicalize"]["output_gaze_key"] is None
-        assert summary["validation"]["sample"]["has_gaze_label"] is False
+        with pytest.raises(ValueError, match="required robot point gaze key"):
+            prepare_robot_gaze_wam_zarr(
+                input_path=str(raw_path),
+                output_path=str(root / "prepared_robot.zarr"),
+                gaze_key="None",
+                heatmap_key="eye_gaze_heatmap",
+                timestamp_key="null",
+                overwrite=True,
+                n_obs_steps=2,
+                action_horizon=3,
+                image_size=(16, 16),
+                heatmap_token_grid=(4, 4),
+                skip_preview=True,
+            )
 
 
 def test_prepare_robot_gaze_wam_zarr_threads_timestamp_validation_options():
@@ -9932,7 +10066,11 @@ def test_gaze_wam_dataset_resizes_images_and_normalizes_pixel_gaze_from_source_s
             Path(tmpdir) / "robot.zarr",
             include_action=True,
             image_hw=(32, 48),
-            gaze=pixel_gaze,
+        )
+        _replace_zarr_array(
+            zarr.open(str(robot_path), mode="a")["data"],
+            "gaze_xy",
+            pixel_gaze,
         )
         dataset = GazeWamRobotDataset(
             dataset_path=str(robot_path),
@@ -9970,16 +10108,25 @@ def test_gaze_wam_dataset_resizes_images_and_normalizes_pixel_gaze_from_source_s
             raise AssertionError("Expected unsupported image_resize_mode to fail.")
 
 
-def test_gaze_wam_open_dataset_accepts_dense_heatmap_without_gaze_point():
+def test_gaze_wam_open_dataset_accepts_dense_heatmap_with_masked_point_gaze():
     with tempfile.TemporaryDirectory() as tmpdir:
-        open_path = _write_open_heatmap_only_zarr(Path(tmpdir) / "open.zarr")
+        open_path = _write_gaze_wam_zarr(
+            Path(tmpdir) / "open.zarr",
+            include_action=False,
+            image_hw=(32, 32),
+        )
+        _replace_zarr_array(
+            zarr.open(str(open_path), mode="a")["data"],
+            "has_gaze_label",
+            np.zeros(6, dtype=np.bool_),
+        )
         dataset = GazeWamOpenDataset(
             dataset_path=str(open_path),
             n_obs_steps=2,
             action_horizon=3,
             image_size=(16, 16),
             heatmap_token_grid=(4, 4),
-            gaze_key="missing_gaze_xy",
+            gaze_key="gaze_xy",
             heatmap_key="gaze_heatmap",
         )
 
@@ -10245,18 +10392,16 @@ def test_convert_open_gaze_manifest_gaze_bounds_policy():
             + "\n",
             encoding="utf-8",
         )
-        drop_summary = convert_open_gaze_manifest(
-            manifest_path=str(manifest_path),
-            output_path=str(root / "open_drop_heatmap.zarr"),
-            image_size=(16, 16),
-            gaze_is_normalized=False,
-            gaze_bounds_policy="drop",
-            label_mode="heatmap",
-            overwrite=True,
-        )
-        assert drop_summary["label_mode"] == "heatmap"
-        assert drop_summary["gaze_bounds_policy"] == "drop"
-        assert "gaze_xy" not in zarr.open(str(root / "open_drop_heatmap.zarr"), mode="r")["data"]
+        with pytest.raises(ValueError, match="label_mode='heatmap' requires"):
+            convert_open_gaze_manifest(
+                manifest_path=str(manifest_path),
+                output_path=str(root / "open_drop_heatmap.zarr"),
+                image_size=(16, 16),
+                gaze_is_normalized=False,
+                gaze_bounds_policy="drop",
+                label_mode="heatmap",
+                overwrite=True,
+            )
 
 
 def test_convert_open_gaze_manifest_rejects_non_stretch_resize_mode():
@@ -10264,7 +10409,7 @@ def test_convert_open_gaze_manifest_rejects_non_stretch_resize_mode():
         root = Path(tmpdir)
         image_dir = root / "images"
         image_dir.mkdir()
-        _write_png(image_dir / "frame.png", np.zeros((10, 20, 3), dtype=np.uint8))
+        cv2.imwrite(str(image_dir / "frame.png"), np.zeros((10, 20, 3), dtype=np.uint8))
         manifest_path = root / "manifest.csv"
         manifest_path.write_text(
             "\n".join(
@@ -10316,6 +10461,8 @@ def test_convert_open_gaze_manifest_dense_heatmap_labels_to_zarr():
                         {
                             "episode_id": "episode_a",
                             "image_path": str(image_path.relative_to(root)),
+                            "gaze_x": 0.5,
+                            "gaze_y": 0.5,
                             "heatmap_path": str(heatmap_path.relative_to(root)),
                         }
                     )
@@ -10329,19 +10476,22 @@ def test_convert_open_gaze_manifest_dense_heatmap_labels_to_zarr():
             image_size=(16, 16),
             label_mode="heatmap",
             root_dir=str(root),
-            gaze_key="null",
             overwrite=True,
         )
 
         assert summary["label_mode"] == "heatmap"
-        assert summary["presence_mask_keys"] == ["has_heatmap_image"]
+        assert summary["presence_mask_keys"] == ["has_gaze_label", "has_heatmap_image"]
         zroot = zarr.open(str(output_path), mode="r")
         assert zroot["data/camera0_rgb"].shape == (3, 16, 16, 3)
-        assert "gaze_xy" not in zroot["data"]
+        assert zroot["data/gaze_xy"].shape == (3, 2)
         assert zroot["data/gaze_heatmap"].shape == (3, 16, 16)
+        assert zroot["data/has_gaze_label"][:].tolist() == [True, True, True]
         assert zroot["data/has_heatmap_image"].shape == (3,)
         assert zroot["data/has_heatmap_image"][:].tolist() == [True, True, True]
-        assert zroot["meta"].attrs["presence_mask_keys"] == ["has_heatmap_image"]
+        assert zroot["meta"].attrs["presence_mask_keys"] == [
+            "has_gaze_label",
+            "has_heatmap_image",
+        ]
         assert np.isclose(float(zroot["data/gaze_heatmap"][:].max()), 1.0, atol=1e-6)
 
         dataset = GazeWamOpenDataset(
@@ -10350,12 +10500,11 @@ def test_convert_open_gaze_manifest_dense_heatmap_labels_to_zarr():
             action_horizon=3,
             image_size=(16, 16),
             heatmap_token_grid=(4, 4),
-            gaze_key="missing_gaze_xy",
             heatmap_key="gaze_heatmap",
         )
         sample = dataset[1]
-        assert sample["has_gaze_label"].item() is False
-        assert torch.allclose(sample["gaze_xy"], torch.zeros(2))
+        assert sample["has_gaze_label"].item() is True
+        assert torch.allclose(sample["gaze_xy"], torch.tensor([0.5, 0.5]))
         assert sample["heatmap"].max() > 0
         assert sample["has_heatmap_image"].item() is True
 
@@ -10529,7 +10678,7 @@ def test_prepare_open_gaze_wam_zarr_manifest_dry_run_does_not_write_output():
         assert payload["planned_commands"] == summary["planned_commands"]
 
 
-def test_prepare_open_gaze_wam_zarr_heatmap_manifest_accepts_null_gaze_key():
+def test_prepare_open_gaze_wam_zarr_heatmap_manifest_requires_point_gaze():
     with tempfile.TemporaryDirectory() as tmpdir:
         root = Path(tmpdir)
         image_dir = root / "images"
@@ -10551,6 +10700,8 @@ def test_prepare_open_gaze_wam_zarr_heatmap_manifest_accepts_null_gaze_key():
                         {
                             "episode_id": "episode_heatmap",
                             "image_path": str(image_path.relative_to(root)),
+                            "gaze_x": 0.5,
+                            "gaze_y": 0.5,
                             "heatmap_path": str(heatmap_path.relative_to(root)),
                         }
                     )
@@ -10563,7 +10714,6 @@ def test_prepare_open_gaze_wam_zarr_heatmap_manifest_accepts_null_gaze_key():
             output_zarr=str(output_zarr),
             root_dir=str(root),
             label_mode="heatmap",
-            gaze_key="null",
             heatmap_key="gaze_heatmap",
             image_size=(16, 16),
             n_obs_steps=2,
@@ -10574,12 +10724,15 @@ def test_prepare_open_gaze_wam_zarr_heatmap_manifest_accepts_null_gaze_key():
 
         assert summary["ok"] is True
         assert summary["convert"]["label_mode"] == "heatmap"
-        assert summary["convert"]["presence_mask_keys"] == ["has_heatmap_image"]
+        assert summary["convert"]["presence_mask_keys"] == [
+            "has_gaze_label",
+            "has_heatmap_image",
+        ]
         assert summary["validation"]["presence_masks"]["has_heatmap_image"]["true_count"] == 3
-        assert summary["validation"]["sample"]["has_gaze_label"] is False
-        assert summary["preview"]["has_gaze_label"] is False
+        assert summary["validation"]["sample"]["has_gaze_label"] is True
+        assert summary["preview"]["has_gaze_label"] is True
         zroot = zarr.open(str(output_zarr), mode="r")
-        assert "gaze_xy" not in zroot["data"]
+        assert "gaze_xy" in zroot["data"]
         assert "gaze_heatmap" in zroot["data"]
         assert zroot["data/has_heatmap_image"][:].tolist() == [True, True, True]
 
@@ -11569,6 +11722,13 @@ def test_review_gaze_wam_training_readiness_does_not_pass_missing_onboarding_pat
             "errors": [],
             "warnings": [],
             "preflight_routing_validation_guardrails_ok": True,
+            "real_data_readiness": {
+                "dino_source_verifier": {
+                    "ok": True,
+                    "errors": [],
+                    "warnings": [],
+                },
+            },
         }
 
     monkeypatch.setattr(
@@ -11681,7 +11841,7 @@ def test_prepare_open_gaze_wam_zarr_video_metadata_timestamp_key_forces_adapt():
         assert np.allclose(zroot["data/timestamp"][:], np.asarray([0.0]))
 
 
-def test_gaze_wam_offline_metric_evaluator_robot_and_open_sources():
+def test_gaze_wam_offline_metric_evaluator_robot_and_open_sources(tmp_path):
     torch.manual_seed(9)
     shape_meta = {
         "action": {
@@ -11693,6 +11853,12 @@ def test_gaze_wam_offline_metric_evaluator_robot_and_open_sources():
         num_train_timesteps=10,
         beta_schedule="squaredcos_cap_v2",
         prediction_type="epsilon",
+    )
+    encoder_path, decoder_path = _write_fake_cosmos_jit_pair(
+        tmp_path,
+        image_size=(16, 16),
+        token_grid=(4, 4),
+        latent_channels=1,
     )
     policy = GazeWamPolicy(
         shape_meta=shape_meta,
@@ -11716,12 +11882,27 @@ def test_gaze_wam_offline_metric_evaluator_robot_and_open_sources():
         heatmap_num_tokens=16,
         heatmap_token_grid=(4, 4),
         heatmap_image_size=(16, 16),
+        heatmap_cosmos_encoder_path=encoder_path,
+        heatmap_cosmos_decoder_path=decoder_path,
         n_emb=32,
     )
 
     with tempfile.TemporaryDirectory() as tmpdir:
         robot_path = _write_gaze_wam_zarr(Path(tmpdir) / "robot.zarr", include_action=True)
         open_path = _write_gaze_wam_zarr(Path(tmpdir) / "open.zarr", include_action=False)
+        robot_root = zarr.open(str(robot_path), mode="a")
+        robot_data = robot_root["data"]
+        robot_heatmap = np.zeros_like(robot_data["gaze_heatmap"][:], dtype=np.float32)
+        _replace_zarr_array(robot_data, "gaze_heatmap", robot_heatmap)
+        robot_heatmap_presence = np.zeros_like(
+            robot_data["has_heatmap_image"][:],
+            dtype=np.bool_,
+        )
+        _replace_zarr_array(
+            robot_data,
+            "has_heatmap_image",
+            robot_heatmap_presence,
+        )
         robot_dataset = GazeWamRobotDataset(
             dataset_path=str(robot_path),
             n_obs_steps=2,
@@ -11945,13 +12126,46 @@ def test_gaze_wam_offline_metric_evaluator_rejects_non_bool_presence_masks():
         assert "batch['has_heatmap_image'] must be a BoolTensor" in str(exc)
 
 
-def test_compare_gaze_wam_ablation_metrics_rows_and_csv():
+def test_compare_gaze_wam_ablation_metrics_rows_and_csv(monkeypatch):
+    def fake_load_policy_for_eval(
+        cfg,
+        checkpoint,
+        device,
+        use_ema,
+        overrides=None,
+        trust_checkpoint=False,
+    ):
+        assert checkpoint is None
+        return object(), cfg
+
+    def fake_evaluate_gaze_wam_sources(policy, cfg, **kwargs):
+        return {
+            "robot_denoise_loss": 0.25,
+            "robot_num_samples": 2.0,
+            "robot_action_supervision_count": 2.0,
+            "robot_heatmap_supervision_count": 0.0,
+            "robot_zarr_validation": {
+                "valid": True,
+                "dataset_type": "robot",
+                "sample": {"action_roundtrip_max_error": 0.0},
+            },
+        }
+
+    monkeypatch.setattr(
+        eval_gaze_wam_metrics_module,
+        "load_policy_for_eval",
+        fake_load_policy_for_eval,
+    )
+    monkeypatch.setattr(
+        eval_gaze_wam_metrics_module,
+        "evaluate_gaze_wam_sources",
+        fake_evaluate_gaze_wam_sources,
+    )
+
     rows = compare_gaze_wam_ablation_metrics(
         variants=[
             "main_debug=train_gaze_wam_debug_workspace",
             "robot_only_debug=train_gaze_wam_robot_only_debug_workspace",
-            "cfg_debug=train_gaze_wam_cfg_debug_workspace",
-            "heatmap_clean_token_debug=train_gaze_wam_heatmap_clean_token_debug_workspace",
         ],
         device="cpu",
         batch_size=2,
@@ -11965,8 +12179,6 @@ def test_compare_gaze_wam_ablation_metrics_rows_and_csv():
     assert [row["variant"] for row in rows] == [
         "main_debug",
         "robot_only_debug",
-        "cfg_debug",
-        "heatmap_clean_token_debug",
     ]
     assert rows[0]["config_name"] == "train_gaze_wam_debug_workspace"
     assert rows[1]["config_name"] == "train_gaze_wam_robot_only_debug_workspace"
@@ -11982,15 +12194,17 @@ def test_compare_gaze_wam_ablation_metrics_rows_and_csv():
     assert rows[0]["provenance_contract_version"] == PROVENANCE_CONTRACT_VERSION
     assert rows[0]["provenance_contract_id"] == provenance_contract_id(rows[0])
     assert len(rows[0]["provenance_contract_id"]) == 16
-    assert rows[2]["policy_cfg_scale"] == 1.5
-    assert rows[2]["effective_cfg_scale"] == 1.5
-    assert rows[2]["cfg_scale"] == 1.5
-    assert rows[2]["provenance_contract_id"] == provenance_contract_id(rows[2])
-    assert rows[3]["heatmap_objective"] == "clean_token"
     assert rows[0]["robot_batch_size"] == 3
     assert rows[0]["open_batch_size"] == 1
     assert rows[0]["robot_ratio"] == 0.75
     assert rows[0]["open_ratio"] == 0.25
+    assert rows[0]["training_stage"] == "mixed_train"
+    assert rows[0]["batch_size_source"] == "ratio"
+    assert rows[0]["requested_batch_size_source"] == "auto"
+    assert rows[0]["total_batch_size_per_process"] == 4
+    assert rows[0]["requested_total_batch_size_per_process"] == 4
+    assert rows[0]["requested_robot_ratio"] == 0.75
+    assert rows[0]["requested_open_ratio"] == 0.25
     assert rows[0]["gradient_accumulate_every"] == 1
     assert rows[0]["num_processes"] == 1
     assert rows[0]["mixed_precision"] == "no"
@@ -12040,7 +12254,11 @@ def test_compare_gaze_wam_ablation_metrics_rows_and_csv():
     assert text.startswith(
         "variant,config_name,checkpoint,checkpoint_provided,"
         "global_overrides,variant_overrides,provenance_contract_version,"
-        "provenance_contract_id,eval_sources,eval_batch_size,eval_max_batches,"
+        "provenance_contract_id,training_stage,batch_size_source,"
+        "requested_batch_size_source,"
+        "total_batch_size_per_process,requested_total_batch_size_per_process,"
+        "requested_robot_ratio,requested_open_ratio,eval_sources,"
+        "eval_batch_size,eval_max_batches,"
         "eval_cfg_scale,policy_cfg_scale,effective_cfg_scale,cfg_scale,robot_batch_size"
     )
     assert "gradient_accumulate_every,num_processes,mixed_precision" in text
@@ -12056,11 +12274,33 @@ def test_compare_gaze_wam_ablation_metrics_rows_and_csv():
     assert "obs_encoder_cache_dir_is_dir" in text
     assert "main_debug" in text
     assert "robot_only_debug" in text
-    assert "cfg_debug" in text
-    assert "heatmap_clean_token_debug" in text
 
 
-def test_compare_gaze_wam_ablation_metrics_records_dino_source_path_types():
+def test_compare_gaze_wam_ablation_metrics_records_dino_source_path_types(monkeypatch):
+    def fake_load_policy_for_eval(
+        cfg,
+        checkpoint,
+        device,
+        use_ema,
+        overrides=None,
+        trust_checkpoint=False,
+    ):
+        return object(), cfg
+
+    def fake_evaluate_gaze_wam_sources(policy, cfg, **kwargs):
+        return {"robot_num_samples": 0.0}
+
+    monkeypatch.setattr(
+        eval_gaze_wam_metrics_module,
+        "load_policy_for_eval",
+        fake_load_policy_for_eval,
+    )
+    monkeypatch.setattr(
+        eval_gaze_wam_metrics_module,
+        "evaluate_gaze_wam_sources",
+        fake_evaluate_gaze_wam_sources,
+    )
+
     with tempfile.TemporaryDirectory() as tmpdir:
         root = Path(tmpdir)
         checkpoint = root / "dinov3.pt"
@@ -12115,17 +12355,18 @@ def test_compare_gaze_wam_ablation_metrics_applies_overrides_to_checkpoint_cfg(m
             "train_gaze_wam_robot_only_debug_workspace",
             overrides=overrides,
         )
-        cfg_after_overrides.training.num_processes = 8
-        cfg_after_overrides.training.mixed_precision = "bf16"
-        cfg_after_overrides.training.distributed_type = "MULTI_GPU"
-        cfg_after_overrides.training.robot_batch_size_per_process = 48
-        cfg_after_overrides.training.open_batch_size_per_process = 16
-        cfg_after_overrides.training.train_batch_size_per_process = 64
-        cfg_after_overrides.training.robot_ratio = 0.75
-        cfg_after_overrides.training.open_ratio = 0.25
-        cfg_after_overrides.training.effective_robot_batch_size_per_optimizer_step = 384
-        cfg_after_overrides.training.effective_open_batch_size_per_optimizer_step = 128
-        cfg_after_overrides.training.effective_train_batch_size_per_optimizer_step = 512
+        with open_dict(cfg_after_overrides.training):
+            cfg_after_overrides.training.num_processes = 8
+            cfg_after_overrides.training.mixed_precision = "bf16"
+            cfg_after_overrides.training.distributed_type = "MULTI_GPU"
+            cfg_after_overrides.training.robot_batch_size_per_process = 48
+            cfg_after_overrides.training.open_batch_size_per_process = 16
+            cfg_after_overrides.training.train_batch_size_per_process = 64
+            cfg_after_overrides.training.robot_ratio = 0.75
+            cfg_after_overrides.training.open_ratio = 0.25
+            cfg_after_overrides.training.effective_robot_batch_size_per_optimizer_step = 384
+            cfg_after_overrides.training.effective_open_batch_size_per_optimizer_step = 128
+            cfg_after_overrides.training.effective_train_batch_size_per_optimizer_step = 512
         return object(), cfg_after_overrides
 
     def fake_evaluate_gaze_wam_sources(policy, cfg, **kwargs):
@@ -12455,65 +12696,73 @@ def test_plan_gaze_wam_experiments_builds_debug_plan_and_outputs():
     assert plan["contract_summary"]["image_shape"] == "3x256x256"
     assert plan["contract_summary"]["visual_token_count"] == 512
     assert len(plan["train_jobs"]) == 6
-    assert plan["train_jobs"][0]["variant"] == "main_debug"
-    assert plan["train_jobs"][0]["config_name"] == "train_gaze_wam_debug_workspace"
-    assert plan["train_jobs"][0]["robot_batch_size"] == 3
-    assert plan["train_jobs"][0]["open_batch_size"] == 1
-    assert plan["train_jobs"][0]["robot_ratio"] == 0.75
-    assert plan["train_jobs"][0]["open_ratio"] == 0.25
-    assert plan["train_jobs"][0]["gradient_accumulate_every"] == 1
-    assert plan["train_jobs"][0]["num_processes"] == 8
-    assert plan["train_jobs"][0]["mixed_precision"] == "bf16"
-    assert plan["train_jobs"][0]["distributed_type"] == "MULTI_GPU"
-    assert plan["train_jobs"][0]["effective_robot_batch_size_per_optimizer_step"] == 24
-    assert plan["train_jobs"][0]["effective_open_batch_size_per_optimizer_step"] == 8
-    assert plan["train_jobs"][0]["effective_train_batch_size_per_optimizer_step"] == 32
-    assert plan["train_jobs"][0]["robot_gaze_dropout_prob"] == 0.2
-    assert plan["train_jobs"][0]["robot_heatmap_on_gaze_dropout"] is True
-    assert plan["train_jobs"][0]["use_block_attention_mask"] is True
-    assert plan["train_jobs"][0]["heatmap_objective"] == "dsnt_js"
-    assert plan["train_jobs"][0]["image_resize_mode"] == "stretch"
-    assert plan["train_jobs"][0]["robot_image_resize_mode"] == "stretch"
-    assert plan["train_jobs"][0]["open_image_resize_mode"] == "stretch"
-    assert plan["train_jobs"][0]["obs_encoder_model_name"] == "vit_base_patch16_dinov3"
-    assert plan["train_jobs"][0]["obs_encoder_pretrained"] is False
-    assert plan["train_jobs"][0]["obs_encoder_checkpoint_path"] == ""
-    assert plan["train_jobs"][0]["obs_encoder_checkpoint_path_exists"] is False
-    assert plan["train_jobs"][0]["obs_encoder_checkpoint_path_is_file"] is False
-    assert plan["train_jobs"][0]["obs_encoder_cache_dir"] == ""
-    assert plan["train_jobs"][0]["obs_encoder_cache_dir_exists"] is False
-    assert plan["train_jobs"][0]["obs_encoder_cache_dir_is_dir"] is False
-    assert plan["train_jobs"][0]["obs_encoder_local_weight_source_configured"] is False
-    assert plan["train_jobs"][0]["obs_encoder_local_weight_source_valid"] is True
-    assert plan["train_jobs"][0]["provenance_contract_version"] == PROVENANCE_CONTRACT_VERSION
-    assert plan["train_jobs"][0]["provenance_contract_id"] == provenance_contract_id(
-        plan["train_jobs"][0]
-    )
-    assert plan["train_jobs"][-1]["variant"] == "heatmap_clean_token_debug"
-    assert plan["train_jobs"][-1]["config_name"] == "train_gaze_wam_heatmap_clean_token_debug_workspace"
-    assert plan["train_jobs"][-1]["heatmap_objective"] == "clean_token"
-    robot_only_job = next(job for job in plan["train_jobs"] if job["variant"] == "robot_only_debug")
+    assert [job["variant"] for job in plan["train_jobs"]] == [
+        "robot_only_debug",
+        "mixed_debug",
+        "open_ratio_100_0_debug",
+        "open_ratio_90_10_debug",
+        "open_ratio_75_25_debug",
+        "open_ratio_50_50_debug",
+    ]
+    robot_only_job = plan["train_jobs"][0]
+    mixed_job = plan["train_jobs"][1]
+    assert robot_only_job["config_name"] == "train_gaze_wam_robot_only_debug_workspace"
+    assert robot_only_job["robot_batch_size"] == 3
     assert robot_only_job["open_batch_size"] == 0
     assert robot_only_job["robot_ratio"] == 1.0
-    assert robot_only_job["robot_heatmap_on_gaze_dropout"] is False
-    no_gaze_job = next(job for job in plan["train_jobs"] if job["variant"] == "no_gaze_debug")
-    assert no_gaze_job["robot_gaze_dropout_prob"] == 1.0
-    assert no_gaze_job["robot_heatmap_on_gaze_dropout"] is False
-    assert plan["train_jobs"][0]["command"][:4] == [
+    assert robot_only_job["open_ratio"] == 0.0
+    assert robot_only_job["training_stage"] == "robot_only"
+    assert robot_only_job["total_batch_size_per_process"] == 3
+    assert robot_only_job["effective_robot_batch_size_per_optimizer_step"] == 24
+    assert robot_only_job["effective_open_batch_size_per_optimizer_step"] == 0
+    assert robot_only_job["effective_train_batch_size_per_optimizer_step"] == 24
+    assert mixed_job["config_name"] == "train_gaze_wam_debug_workspace"
+    assert mixed_job["robot_batch_size"] == 3
+    assert mixed_job["open_batch_size"] == 1
+    assert mixed_job["robot_ratio"] == 0.75
+    assert mixed_job["open_ratio"] == 0.25
+    assert mixed_job["training_stage"] == "mixed_train"
+    assert mixed_job["gradient_accumulate_every"] == 1
+    assert mixed_job["num_processes"] == 8
+    assert mixed_job["mixed_precision"] == "bf16"
+    assert mixed_job["distributed_type"] == "MULTI_GPU"
+    assert mixed_job["effective_train_batch_size_per_optimizer_step"] == 32
+    assert mixed_job["robot_gaze_dropout_prob"] == 0.2
+    assert mixed_job["robot_heatmap_on_gaze_dropout"] is True
+    assert mixed_job["use_block_attention_mask"] is True
+    assert mixed_job["heatmap_objective"] == "dsnt_js"
+    assert mixed_job["image_resize_mode"] == "stretch"
+    assert mixed_job["robot_image_resize_mode"] == "stretch"
+    assert mixed_job["open_image_resize_mode"] == "stretch"
+    assert mixed_job["obs_encoder_model_name"] == "vit_base_patch16_dinov3"
+    assert mixed_job["obs_encoder_pretrained"] is False
+    assert mixed_job["obs_encoder_checkpoint_path"] == ""
+    assert mixed_job["obs_encoder_checkpoint_path_exists"] is False
+    assert mixed_job["obs_encoder_checkpoint_path_is_file"] is False
+    assert mixed_job["obs_encoder_cache_dir"] == ""
+    assert mixed_job["obs_encoder_cache_dir_exists"] is False
+    assert mixed_job["obs_encoder_cache_dir_is_dir"] is False
+    assert mixed_job["obs_encoder_local_weight_source_configured"] is False
+    assert mixed_job["obs_encoder_local_weight_source_valid"] is True
+    assert mixed_job["provenance_contract_version"] == PROVENANCE_CONTRACT_VERSION
+    assert mixed_job["provenance_contract_id"] == provenance_contract_id(mixed_job)
+    assert robot_only_job["command"][:4] == [
         "accelerate",
         "launch",
         "--config_file",
         "accelerate/8gpu-amp.yaml",
     ]
-    assert "training.max_train_steps=1" in plan["train_jobs"][0]["command"]
+    assert "training.max_train_steps=1" in robot_only_job["command"]
     eval_command = plan["eval_job"]["command"]
     assert eval_command[:2] == ["py", "scripts/compare_gaze_wam_ablation_metrics.py"]
     assert "--variant" in eval_command
-    assert "main_debug=train_gaze_wam_debug_workspace:data/outputs/main_debug/checkpoints/latest.ckpt" in eval_command
-    assert "cfg_debug=train_gaze_wam_cfg_debug_workspace:data/outputs/cfg_debug/checkpoints/latest.ckpt" in eval_command
     assert (
-        "heatmap_clean_token_debug=train_gaze_wam_heatmap_clean_token_debug_workspace:"
-        "data/outputs/heatmap_clean_token_debug/checkpoints/latest.ckpt"
+        "robot_only_debug=train_gaze_wam_robot_only_debug_workspace:"
+        "data/outputs/robot_only_debug/checkpoints/latest.ckpt"
+    ) in eval_command
+    assert (
+        "mixed_debug=train_gaze_wam_debug_workspace:"
+        "data/outputs/mixed_debug/checkpoints/latest.ckpt"
     ) in eval_command
     assert "--skip-sampling" in eval_command
     assert "--skip-heatmap" in eval_command
@@ -12524,15 +12773,15 @@ def test_plan_gaze_wam_experiments_builds_debug_plan_and_outputs():
     assert "--require-timestamps" in eval_command
     assert "--timestamp-max-step" in eval_command
     assert "0.08" in eval_command
-    assert "--variant-override" not in eval_command
+    assert "--variant-override" in eval_command
     assert len(plan["eval_job"]["variant_jobs"]) == 6
-    assert plan["eval_job"]["variant_jobs"][0]["variant"] == "main_debug"
+    assert plan["eval_job"]["variant_jobs"][0]["variant"] == "robot_only_debug"
     assert plan["eval_job"]["variant_jobs"][0]["checkpoint"] == (
-        "data/outputs/main_debug/checkpoints/latest.ckpt"
+        "data/outputs/robot_only_debug/checkpoints/latest.ckpt"
     )
     assert plan["eval_job"]["variant_jobs"][0]["obs_encoder_pretrained"] is False
     assert plan["eval_job"]["variant_jobs"][0]["obs_encoder_local_weight_source_valid"] is True
-    assert plan["eval_job"]["variant_jobs"][0]["provenance_contract_id"] == plan["train_jobs"][0][
+    assert plan["eval_job"]["variant_jobs"][0]["provenance_contract_id"] == robot_only_job[
         "provenance_contract_id"
     ]
     assert plan["eval_validation"] == {
@@ -12560,7 +12809,8 @@ def test_plan_gaze_wam_experiments_builds_debug_plan_and_outputs():
     assert "image_resize_mode,robot_image_resize_mode,open_image_resize_mode" in csv_text
     assert "obs_encoder_pretrained,obs_encoder_checkpoint_path" in csv_text
     assert "obs_encoder_cache_dir_is_dir,obs_encoder_local_weight_source_configured" in csv_text
-    assert "main_debug" in csv_text
+    assert "robot_only_debug" in csv_text
+    assert "mixed_debug" in csv_text
     assert "compare_gaze_wam_ablation_metrics.py" in csv_text
     assert "set -euo pipefail" in script_text
     assert "training.max_train_steps=1" in script_text
@@ -12919,7 +13169,10 @@ def test_preflight_gaze_wam_debug_config_runs_loss_smoke(tmp_path):
     )
     assert (
         summary["data_stream_contract"]["mixing"]["ratio_source"]
-        == "robot_dataloader.batch_size/open_dataloader.batch_size"
+        == (
+            "data_mixing.total_batch_size_per_process+"
+            "data_mixing.robot_ratio+data_mixing.open_ratio"
+        )
     )
     assert summary["data_stream_contract"]["mixing"]["robot_ratio_per_process"] == 0.75
     assert summary["data_stream_contract"]["mixing"]["open_ratio_per_process"] == 0.25
@@ -13018,7 +13271,7 @@ def test_preflight_gaze_wam_debug_config_runs_loss_smoke(tmp_path):
     ] == "(~is_open) & has_action"
     assert summary["policy_contract"]["loss_routing_contract"][
         "heatmap_loss_mask"
-    ] == "has_heatmap & has_gaze_label for dsnt_js"
+    ] == "has_heatmap & has_gaze_label"
     assert summary["policy_contract"]["loss_routing_contract"]["open_rows"][
         "trains_action"
     ] is False
@@ -13129,6 +13382,7 @@ def test_preflight_gaze_wam_debug_config_runs_loss_smoke(tmp_path):
 def test_preflight_gaze_wam_robot_only_skips_open_dataset():
     summary = preflight_gaze_wam(
         config_name="train_gaze_wam_robot_only_debug_workspace",
+        overrides=["task.robot_gaze_dropout_prob=1.0"],
         device="cpu",
         validate_zarr=False,
         run_loss_smoke=True,
@@ -13154,12 +13408,12 @@ def test_preflight_gaze_wam_robot_only_skips_open_dataset():
     )
     assert summary["loss_smoke"]["mixed_batch_size"] == 3
     assert summary["loss_smoke"]["action_loss_mask_count"] == 3.0
-    assert summary["loss_smoke"]["heatmap_loss_mask_count"] == 0.0
+    assert summary["loss_smoke"]["heatmap_loss_mask_count"] == 3.0
     assert summary["loss_smoke"]["routing"]["robot_rows"] == 3
     assert summary["loss_smoke"]["routing"]["open_rows"] == 0
     assert summary["loss_smoke"]["routing"]["robot_action_loss_count"] == 3
     assert summary["loss_smoke"]["routing"]["open_action_loss_count"] == 0
-    assert summary["loss_smoke"]["routing"]["robot_heatmap_loss_count"] == 0
+    assert summary["loss_smoke"]["routing"]["robot_heatmap_loss_count"] == 3
     assert summary["loss_smoke"]["routing"]["open_heatmap_loss_count"] == 0
     assert summary["loss_smoke"]["routing"]["robot_real_gaze_heatmap_loss_count"] == 0
 
@@ -13296,10 +13550,11 @@ def test_preflight_gaze_wam_reports_zero_train_dataloader_batches():
     summary = preflight_gaze_wam(
         config_name="train_gaze_wam_debug_workspace",
         overrides=[
+            "data_mixing.batch_size_source=dataloader",
             "robot_dataloader.batch_size=999",
-            "robot_dataloader.drop_last=true",
             "open_dataloader.batch_size=999",
-            "open_dataloader.drop_last=true",
+            "data_mixing.robot_tail_policy=drop",
+            "data_mixing.open_tail_policy=drop",
         ],
         device="cpu",
         validate_zarr=False,
@@ -13318,8 +13573,7 @@ def test_preflight_gaze_wam_reports_zero_train_dataset_samples():
         config_name="train_gaze_wam_debug_workspace",
         overrides=[
             "task.action_horizon=64",
-            "task.robot_dataset.action_horizon=64",
-            "task.open_dataset.action_horizon=64",
+            "task.action_padding=false",
         ],
         device="cpu",
         validate_zarr=False,
@@ -13335,7 +13589,7 @@ def test_preflight_gaze_wam_reports_zero_train_dataset_samples():
     assert any("open_train_samples=0" in error for error in summary["errors"])
 
 
-def test_preflight_gaze_wam_policy_contract_requires_local_dino_source_when_pretrained():
+def test_preflight_gaze_wam_policy_contract_requires_weight_source_when_pretrained():
     summary = preflight_gaze_wam(
         config_name="train_gaze_wam_debug_workspace",
         device="cpu",
@@ -13354,13 +13608,15 @@ def test_preflight_gaze_wam_policy_contract_requires_local_dino_source_when_pret
             "obs_encoder_cache_dir": "",
             "obs_encoder_cache_dir_exists": False,
             "obs_encoder_local_weight_source_configured": False,
-            "obs_encoder_local_weight_source_exists": True,
+            "obs_encoder_local_weight_source_exists": False,
+            "obs_encoder_local_weight_source_valid": False,
+            "obs_encoder_hf_hub_id": "",
         }
     )
 
     errors = _check_policy_contract(contract, cfg)
 
-    assert any("requires a local DINO weight source" in error for error in errors)
+    assert any("requires a DINO weight source" in error for error in errors)
 
 
 def test_preflight_gaze_wam_policy_contract_uses_strict_bool_fields():
@@ -13836,6 +14092,7 @@ def test_launch_gaze_wam_training_reports_accelerate_effective_batch():
     summary = launch_gaze_wam_training(
         config_name="train_gaze_wam_workspace",
         overrides=[
+            "data_mixing.batch_size_source=dataloader",
             "robot_dataloader.batch_size=6",
             "open_dataloader.batch_size=2",
             "training.gradient_accumulate_every=2",
@@ -13859,6 +14116,35 @@ def test_launch_gaze_wam_training_reports_accelerate_effective_batch():
     assert summary["acceleration"]["effective_train_batch_size_per_optimizer_step"] == 128
     assert summary["acceleration"]["effective_train_batch_size"] == 128
     assert summary["warnings"] == []
+
+
+def test_launch_gaze_wam_training_ratio_quota_ignores_legacy_batch_overrides():
+    summary = launch_gaze_wam_training(
+        config_name="train_gaze_wam_workspace",
+        overrides=[
+            "robot_dataloader.batch_size=6",
+            "open_dataloader.batch_size=2",
+            "training.gradient_accumulate_every=2",
+        ],
+        use_accelerate=True,
+        accelerate_config="accelerate/8gpu-amp.yaml",
+        skip_preflight=True,
+        run=False,
+    )
+
+    assert summary["ok"] is True
+    acceleration = summary["acceleration"]
+    assert acceleration["batch_size_source"] == "ratio"
+    assert acceleration["requested_total_batch_size_per_process"] == 64
+    assert acceleration["requested_robot_ratio"] == pytest.approx(0.75)
+    assert acceleration["requested_open_ratio"] == pytest.approx(0.25)
+    assert acceleration["robot_batch_size_per_process"] == 48
+    assert acceleration["open_batch_size_per_process"] == 16
+    assert acceleration["train_batch_size_per_process"] == 64
+    assert acceleration["effective_robot_batch_size_per_optimizer_step"] == 768
+    assert acceleration["effective_open_batch_size_per_optimizer_step"] == 256
+    assert acceleration["effective_train_batch_size_per_optimizer_step"] == 1024
+    assert acceleration["warnings"] == []
 
 
 def test_launch_gaze_wam_training_blocks_invalid_training_config_without_preflight():
@@ -14477,7 +14763,7 @@ def test_real_data_readiness_blocks_empty_cache_only_dino_source():
     assert any("cache directory contains no files" in error for error in readiness["errors"])
 
 
-def test_real_data_readiness_ablation_contract_allows_planned_ratio_variants():
+def test_real_data_readiness_contracts_allow_planned_ratio_variants():
     with tempfile.TemporaryDirectory() as tmpdir:
         root = Path(tmpdir)
         robot_path = root / "real_robot.zarr"
@@ -14534,8 +14820,8 @@ def test_real_data_readiness_ablation_contract_allows_planned_ratio_variants():
         for check in ablation_readiness["checks"]
         if not check["ok"]
     }
-    assert main_readiness["ok"] is False
-    assert "source_ratio_75_25" in main_failed_names
+    assert main_readiness["ok"] is True
+    assert "source_ratio_75_25" not in main_failed_names
     assert ablation_readiness["ok"] is True
     assert ablation_readiness["contract"] == "ablation"
     assert "source_ratio_75_25" not in ablation_failed_names
@@ -14846,7 +15132,9 @@ def test_real_data_debug_path_classifier_checks_zarr_store_context():
     assert _looks_like_debug_data_path("data/debug_gaze_wam/robot.zarr") is True
     assert _looks_like_debug_data_path("data/open_smoke/open.zarr") is True
     assert _looks_like_debug_data_path("data/robot_synthetic.zarr") is True
+    assert _looks_like_debug_data_path("data/temp/robot.zarr") is True
     assert _looks_like_debug_data_path("C:/Users/yibo/AppData/Local/Temp/real_robot.zarr") is False
+    assert _looks_like_debug_data_path("/tmp/real_robot.zarr") is False
     assert _looks_like_debug_data_path("W:/real_data/tmp_collection/real_robot.zarr") is False
 
 
@@ -15129,8 +15417,8 @@ def test_real_data_readiness_blocks_main_training_routing_mismatch():
         if not check["ok"]
     }
     assert readiness["ok"] is False
-    assert "open_batch_positive" in failed_names
-    assert "source_ratio_75_25" in failed_names
+    assert "open_batch_positive" not in failed_names
+    assert "source_ratio_75_25" not in failed_names
     assert "robot_gaze_dropout_prob_0p2" in failed_names
     assert "robot_heatmap_on_gaze_dropout_enabled" in failed_names
     assert "heatmap_objective_dsnt_js" in failed_names
@@ -15140,7 +15428,7 @@ def test_real_data_readiness_blocks_main_training_routing_mismatch():
     assert "heatmap_point_nll_loss_weight_0" in failed_names
     assert "heatmap_xy_loss_weight_1" in failed_names
     assert "heatmap_js_loss_weight_1" in failed_names
-    assert any("75% robot / 25% open-source gaze" in error for error in readiness["errors"])
+    assert not any("75% robot / 25% open-source gaze" in error for error in readiness["errors"])
 
 
 def test_gaze_wam_smoke_pipeline_generates_artifacts_and_runs_rehearsal():
@@ -15152,16 +15440,15 @@ def test_gaze_wam_smoke_pipeline_generates_artifacts_and_runs_rehearsal():
             debug_data_dir=str(root / "debug_data"),
             num_episodes=1,
             episode_length=18,
-            image_size=16,
+            image_size=256,
             seed=77,
             device="cpu",
             max_rehearsal_steps=1,
             max_commands_per_step=1,
             num_inference_steps=2,
-            extra_overrides=[
-                "policy.obs_encoder.pretrained=false",
-                "policy.heatmap_image_size=[16,16]",
-            ],
+            run_deployment_rehearsal=True,
+            run_split_rehearsal=True,
+            extra_overrides=["policy.obs_encoder.pretrained=false"],
         )
 
         assert summary["ok"] is True
@@ -15316,6 +15603,7 @@ def test_gaze_wam_smoke_pipeline_policy_only_skips_deployment_rehearsal():
                 open_dataset_path="open.zarr",
                 image_size=16,
             )
+            payload = json.loads(Path(summary["summary_json"]).read_text(encoding="utf-8"))
     finally:
         gaze_wam_smoke_pipeline_module.validate_gaze_wam_zarr = original_validate
         gaze_wam_smoke_pipeline_module.preflight_gaze_wam = original_preflight
@@ -15333,7 +15621,6 @@ def test_gaze_wam_smoke_pipeline_policy_only_skips_deployment_rehearsal():
     assert calls["rehearsal"] == 0
     assert len(calls["validation"]) == 2
     assert calls["preflight"] is not None
-    payload = json.loads(Path(summary["summary_json"]).read_text(encoding="utf-8"))
     assert payload["run_deployment_rehearsal"] is False
     assert payload["rehearsal"] is None
 

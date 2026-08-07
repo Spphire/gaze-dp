@@ -67,10 +67,11 @@ def _resolve_robot_label_keys(
     heatmap_key = as_optional_gaze_wam_key(heatmap_key)
     resolved_gaze_key = gaze_key if gaze_key is not None else _suggested_key(inspect_summary, "gaze")
     resolved_heatmap_key = heatmap_key if heatmap_key is not None else _suggested_key(inspect_summary, "heatmap")
-    if resolved_gaze_key is None and resolved_heatmap_key is None:
+    if resolved_gaze_key is None:
         raise ValueError(
-            "Could not infer a robot gaze label source. Pass --gaze-key for point labels or "
-            "--heatmap-key for dense one-channel heatmap labels."
+            "Could not infer the required robot point gaze key. Pass --gaze-key for "
+            "normalized or pixel point labels; a dense heatmap alone is not a canonical "
+            "Gaze-WAM training input."
         )
     return {
         "gaze_key": resolved_gaze_key,

@@ -115,6 +115,7 @@ ema:
 
 robot_dataloader:
   batch_size: 48
+  drop_last: false
   num_workers: 8
   shuffle: true
   pin_memory: true
@@ -122,6 +123,7 @@ robot_dataloader:
 
 open_dataloader:
   batch_size: 16
+  drop_last: false
   num_workers: 8
   shuffle: true
   pin_memory: true
@@ -129,6 +131,7 @@ open_dataloader:
 
 val_robot_dataloader:
   batch_size: 48
+  drop_last: false
   num_workers: 8
   shuffle: false
   pin_memory: true
@@ -136,10 +139,22 @@ val_robot_dataloader:
 
 val_open_dataloader:
   batch_size: 16
+  drop_last: false
   num_workers: 8
   shuffle: false
   pin_memory: true
   persistent_workers: true
+
+# The training batch is expressed as a per-process total plus source quotas.
+# Robot data remains the epoch clock; open data is replayed to fill its quota.
+data_mixing:
+  batch_size_source: ratio
+  total_batch_size_per_process: 64
+  robot_ratio: 0.75
+  open_ratio: 0.25
+  robot_tail_policy: pad
+  open_tail_policy: pad
+  validation_tail_policy: keep
 
 optimizer:
   lr: 3.0e-4
@@ -149,6 +164,7 @@ optimizer:
   betas: [0.95, 0.999]
 
 training:
+  stage: mixed_train
   device: "cuda:0"
   seed: 42
   debug: false
@@ -172,6 +188,12 @@ training:
   gdr_every: 100
   max_train_steps: null
   tqdm_interval_sec: 1.0
+  transfer:
+    load_path: ""
+    load_scope: obs_encoder
+    export_path: ""
+    export_scope: obs_encoder
+    export_overwrite: false
 
 logging:
   project: gaze_wam
@@ -184,10 +206,11 @@ logging:
 
 checkpoint:
   topk:
-    monitor_key: val_loss
+    # Robot validation is the gate for mixed training; open validation is diagnostic.
+    monitor_key: val_robot_loss
     mode: min
     k: 20
-    format_str: 'epoch={epoch:04d}-val_loss={val_loss:.3f}.ckpt'
+    format_str: 'epoch={epoch:04d}-val_robot_loss={val_robot_loss:.3f}.ckpt'
   save_last_ckpt: true
   save_last_snapshot: false
 
