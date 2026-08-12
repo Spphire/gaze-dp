@@ -53,6 +53,7 @@ from diffusion_policy.dataset.gaze_wam_mixing import (  # noqa: E402
 from diffusion_policy.dataset.gaze_wam_dataset import (  # noqa: E402
     GazeWamOpenDataset,
     GazeWamRobotDataset,
+    _image_to_chw_float as _dataset_image_to_chw_float,
     _validate_nonnegative_int as _validate_gaze_wam_dataset_nonnegative_int,
     _validate_positive_int as _validate_gaze_wam_dataset_positive_int,
     _validate_positive_int_pair as _validate_gaze_wam_dataset_positive_int_pair,
@@ -177,6 +178,7 @@ from diffusion_policy.scripts.verify_gaze_wam_dino_source import (  # noqa: E402
 )
 from diffusion_policy.real_world.gaze_wam_inference import (  # noqa: E402
     GazeWamInferenceAdapter,
+    _image_to_chw_float as _inference_image_to_chw_float,
     tcp_pose_to_action_base_abs,
 )
 from diffusion_policy.real_world.gaze_wam_action_base import action_base_abs_to_10d  # noqa: E402
@@ -4783,6 +4785,25 @@ def test_gaze_wam_inference_adapter_history_mask_and_absolute_output(tmp_path):
     assert result["cfg_enabled"].item() is False
     assert np.isclose(result["cfg_scale"].item(), 1.0)
 
+    history = [
+        np.full((20, 24, 3), 32, dtype=np.uint8),
+        np.full((20, 24, 3), 224, dtype=np.uint8),
+    ]
+    adapter.set_image_history(history)
+    stacked_history = adapter._stack_history()
+    assert stacked_history.shape == (2, 3, 16, 16)
+    assert float(stacked_history[0].mean()) < float(stacked_history[1].mean())
+    try:
+        adapter.predict_action(
+            image=image,
+            image_history=history,
+            action_base_abs=base_abs,
+        )
+    except ValueError as exc:
+        assert "either image or image_history" in str(exc)
+    else:
+        raise AssertionError("Expected ambiguous image input to fail.")
+
     obs = adapter.build_obs(gaze_xy=None, action_base_abs=base_abs)
     assert obs["has_gaze_label"].item() is False
     assert obs["use_gaze_condition"].item() is False
@@ -4797,6 +4818,17 @@ def test_gaze_wam_inference_adapter_history_mask_and_absolute_output(tmp_path):
     assert obs_pose_only["action_base_abs"].shape == (1, 10)
     assert torch.allclose(obs_pose_only["action_base_abs"][0, :9], torch.from_numpy(pose_only_base))
     assert torch.isclose(obs_pose_only["action_base_abs"][0, 9], torch.tensor(0.07))
+
+
+def test_gaze_wam_training_and_inference_image_preprocessing_are_identical():
+    rng = np.random.default_rng(20260812)
+    image = rng.integers(0, 256, size=(37, 53, 3), dtype=np.uint8)
+
+    training = _dataset_image_to_chw_float(image[None], image_size=(16, 16))[0]
+    inference = _inference_image_to_chw_float(image, image_size=(16, 16))
+
+    assert training.shape == (3, 16, 16)
+    np.testing.assert_array_equal(inference, training)
 
 
 def test_gaze_wam_action_base_abs_to_10d_requires_gripper_for_pose_only_base():

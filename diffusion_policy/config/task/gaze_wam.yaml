@@ -3,6 +3,8 @@ name: gaze_wam
 image_size: [256, 256]
 image_shape: [3, 256, 256]
 image_resize_mode: stretch
+# Canonical robot rows come from the Collector's aligned 30 Hz fusion timeline.
+robot_sample_fps: 30.0
 robot_dataset_path: data/gaze_wam_robot.zarr
 open_dataset_path: data/gaze_wam_open.zarr
 

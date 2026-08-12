@@ -2,7 +2,6 @@ import collections
 import pathlib
 from typing import Dict, Optional, Sequence, Tuple
 
-import cv2
 import dill
 import hydra
 import numpy as np
@@ -11,6 +10,7 @@ from omegaconf import OmegaConf
 
 from diffusion_policy.common.pytorch_util import dict_apply
 from diffusion_policy.common.checkpoint_security import require_trusted_pickle_artifact
+from diffusion_policy.common.gaze_wam_image import image_to_chw_float
 from diffusion_policy.common.omegaconf_resolvers import register_safe_omegaconf_resolvers
 from diffusion_policy.policy.gaze_wam_policy import GazeWamPolicy
 from diffusion_policy.real_world.gaze_wam_action_base import action_base_abs_to_10d
@@ -77,32 +77,7 @@ def _validate_camera_shape(camera_key: str, obs_meta: dict) -> Tuple[int, int]:
 
 
 def _image_to_chw_float(image: np.ndarray, image_size: Tuple[int, int]) -> np.ndarray:
-    image = np.asarray(image)
-    if image.ndim != 3:
-        raise ValueError(f"Expected image [H,W,C] or [C,H,W], got {image.shape}.")
-    _require_finite_array("image", image)
-    if image.shape[-1] in (1, 3, 4):
-        image_hwc = image
-    elif image.shape[0] in (1, 3, 4):
-        image_hwc = np.moveaxis(image, 0, -1)
-    else:
-        raise ValueError(f"Cannot infer image channel dimension for {image.shape}.")
-    if image_hwc.shape[-1] == 4:
-        image_hwc = image_hwc[..., :3]
-    if image_hwc.shape[-1] == 1:
-        image_hwc = np.repeat(image_hwc, 3, axis=-1)
-    if image_hwc.shape[:2] != tuple(image_size):
-        interp = cv2.INTER_AREA if image_hwc.shape[0] >= image_size[0] else cv2.INTER_LINEAR
-        image_hwc = cv2.resize(
-            image_hwc,
-            (image_size[1], image_size[0]),
-            interpolation=interp,
-        )
-    image_chw = np.moveaxis(image_hwc[..., :3], -1, 0).astype(np.float32)
-    if image_chw.max(initial=0.0) > 1.5:
-        image_chw = image_chw / 255.0
-    _require_finite_array("image", image_chw)
-    return np.ascontiguousarray(image_chw, dtype=np.float32)
+    return image_to_chw_float(image, image_size=image_size, name="image")
 
 
 def tcp_pose_to_action_base_abs(
@@ -232,6 +207,18 @@ class GazeWamInferenceAdapter:
     def push_image(self, image: np.ndarray) -> None:
         self.image_history.append(_image_to_chw_float(image, image_size=self.image_size))
 
+    def set_image_history(self, images: Sequence[np.ndarray]) -> None:
+        """Replace history with timestamp-selected frames from the runtime."""
+        images = list(images)
+        if not images:
+            raise ValueError("image_history must contain at least one image.")
+        processed = [
+            _image_to_chw_float(image, image_size=self.image_size)
+            for image in images[-self.n_obs_steps :]
+        ]
+        self.image_history.clear()
+        self.image_history.extend(processed)
+
     def _stack_history(self) -> np.ndarray:
         if not self.image_history:
             raise RuntimeError("No image has been pushed into the Gaze-WAM inference adapter.")
@@ -276,6 +263,7 @@ class GazeWamInferenceAdapter:
     def predict_action(
         self,
         image: Optional[np.ndarray] = None,
+        image_history: Optional[Sequence[np.ndarray]] = None,
         gaze_xy: Optional[Sequence[float]] = None,
         tcp_pose: Optional[Sequence[float]] = None,
         gripper_width: Optional[float] = None,
@@ -288,7 +276,11 @@ class GazeWamInferenceAdapter:
             if cfg_scale is None
             else self.policy._validate_nonnegative_float("cfg_scale", cfg_scale)
         )
-        if image is not None:
+        if image is not None and image_history is not None:
+            raise ValueError("Provide either image or image_history, not both.")
+        if image_history is not None:
+            self.set_image_history(image_history)
+        elif image is not None:
             self.push_image(image)
         if action_base_abs is None and tcp_pose is not None:
             action_base_abs = tcp_pose_to_action_base_abs(tcp_pose, gripper_width=gripper_width)

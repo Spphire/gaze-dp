@@ -7,6 +7,7 @@ import torch.nn.functional as F
 import zarr
 
 from diffusion_policy.common.action_utils import absolute_actions_to_relative_actions
+from diffusion_policy.common.gaze_wam_image import image_sequence_to_chw_float
 from diffusion_policy.common.gaze_utils import as_optional_gaze_wam_key, check_gaze_bounds
 from diffusion_policy.common.gaze_wam_training_config import (
     normalize_gaze_wam_bool_field,
@@ -239,31 +240,11 @@ def _image_to_chw_float(
     image: np.ndarray,
     image_size: Optional[Tuple[int, int]] = None,
 ) -> np.ndarray:
-    image = np.asarray(image)
-    if image.ndim != 4:
-        raise ValueError(f"Expected image sequence [T,H,W,C] or [T,C,H,W], got {image.shape}.")
-    if image.shape[-1] in (1, 3, 4):
-        image = np.moveaxis(image, -1, 1)
-    elif image.shape[1] not in (1, 3, 4):
-        raise ValueError(f"Cannot infer channel dimension for image shape {image.shape}.")
-    image = image.astype(np.float32)
-    _require_finite_array("camera image", image)
-    if image.max(initial=0) > 1.5:
-        image = image / 255.0
-    image = image[:, :3]
-    if image.shape[1] == 1:
-        image = np.repeat(image, 3, axis=1)
-    if image_size is not None and image.shape[-2:] != tuple(image_size):
-        image_tensor = torch.from_numpy(np.ascontiguousarray(image))
-        image_tensor = F.interpolate(
-            image_tensor,
-            size=tuple(image_size),
-            mode="bilinear",
-            align_corners=False,
-            antialias=True,
-        )
-        image = image_tensor.numpy()
-    return np.ascontiguousarray(image, dtype=np.float32)
+    return image_sequence_to_chw_float(
+        image,
+        image_size=image_size,
+        name="camera image",
+    )
 
 
 def _heatmap_image_to_float(
