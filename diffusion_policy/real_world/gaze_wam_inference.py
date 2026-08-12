@@ -147,6 +147,7 @@ class GazeWamInferenceAdapter:
         camera_key: str = "camera0_rgb",
         image_size: Optional[Sequence[int]] = None,
         n_obs_steps: Optional[int] = None,
+        obs_downsample_steps: int = 1,
         device: Optional[str] = None,
         cfg_scale: float = 1.0,
     ) -> None:
@@ -168,6 +169,10 @@ class GazeWamInferenceAdapter:
         if n_obs_steps is None:
             n_obs_steps = int(obs_meta.get("horizon", 1))
         self.n_obs_steps = _validate_positive_int("n_obs_steps", n_obs_steps)
+        self.obs_downsample_steps = _validate_positive_int(
+            "obs_downsample_steps",
+            obs_downsample_steps,
+        )
         self.cfg_scale = self.policy._validate_nonnegative_float("cfg_scale", cfg_scale)
         self.device = torch.device(device) if device is not None else policy.device
         self.image_history = collections.deque(maxlen=self.n_obs_steps)
@@ -195,6 +200,11 @@ class GazeWamInferenceAdapter:
             policy=policy,
             shape_meta=cfg.task.shape_meta,
             camera_key=camera_key,
+            obs_downsample_steps=OmegaConf.select(
+                cfg,
+                "task.obs_downsample_steps",
+                default=1,
+            ),
             device=device,
             cfg_scale=cfg_scale,
         )

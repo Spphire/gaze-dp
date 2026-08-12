@@ -5033,6 +5033,7 @@ def test_gaze_wam_inference_adapter_validates_geometry_contract(tmp_path):
     )
     assert adapter.image_size == (16, 16)
     assert adapter.n_obs_steps == 2
+    assert adapter.obs_downsample_steps == 1
 
     invalid_cases = [
         (
@@ -5062,6 +5063,10 @@ def test_gaze_wam_inference_adapter_validates_geometry_contract(tmp_path):
         (
             {"n_obs_steps": True},
             "n_obs_steps must be a positive integer",
+        ),
+        (
+            {"obs_downsample_steps": 0},
+            "obs_downsample_steps must be a positive integer",
         ),
     ]
     for overrides, expected_message in invalid_cases:
