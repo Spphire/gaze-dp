@@ -579,6 +579,7 @@ def _validate_timestamp_array(
     errors: List[str],
     require: bool = False,
     strictly_increasing: bool = False,
+    episode_ends: Optional[np.ndarray] = None,
 ):
     _ensure_validator_runtime()
     key = _as_optional_key(key)
@@ -602,8 +603,12 @@ def _validate_timestamp_array(
     if not np.all(np.isfinite(values)):
         errors.append(f"{key} must contain only finite timestamps.")
         return values
-    diffs = np.diff(values)
-    if diffs.size > 0:
+    starts = np.concatenate([[0], episode_ends[:-1]]) if episode_ends is not None else [0]
+    ends = episode_ends if episode_ends is not None else [len(values)]
+    for episode_index, (start, end) in enumerate(zip(starts, ends)):
+        diffs = np.diff(values[int(start):int(end)])
+        if diffs.size == 0:
+            continue
         if strictly_increasing:
             monotonic = np.all(diffs > 0)
             relation = "strictly increasing"
@@ -611,7 +616,8 @@ def _validate_timestamp_array(
             monotonic = np.all(diffs >= 0)
             relation = "nondecreasing"
         if not monotonic:
-            errors.append(f"{key} must be {relation}.")
+            errors.append(f"{key} must be {relation} within episode {episode_index}.")
+            break
     return values
 
 
@@ -645,9 +651,18 @@ def _summarize_timestamp_intervals(
     values: np.ndarray,
     max_step: Optional[float],
     errors: List[str],
+    episode_ends: Optional[np.ndarray] = None,
 ) -> Dict[str, object]:
     _ensure_validator_runtime()
-    diffs = np.diff(np.asarray(values, dtype=np.float64))
+    values = np.asarray(values, dtype=np.float64)
+    starts = np.concatenate([[0], episode_ends[:-1]]) if episode_ends is not None else [0]
+    ends = episode_ends if episode_ends is not None else [len(values)]
+    episode_diffs = [
+        np.diff(values[int(start):int(end)])
+        for start, end in zip(starts, ends)
+        if int(end) - int(start) > 1
+    ]
+    diffs = np.concatenate(episode_diffs) if episode_diffs else np.asarray([], dtype=np.float64)
     if diffs.size == 0:
         return {
             "count": 0,
@@ -684,6 +699,7 @@ def _validate_timestamps(
     require_timestamps: bool,
     timestamp_max_delta: Optional[float],
     timestamp_max_step: Optional[float],
+    episode_ends: Optional[np.ndarray] = None,
 ) -> Dict[str, object]:
     requested = [
         timestamp_key,
@@ -711,6 +727,7 @@ def _validate_timestamps(
         errors,
         require=require_timestamps,
         strictly_increasing=False,
+        episode_ends=episode_ends,
     )
     timestamp_values = {}
     if base is not None:
@@ -727,6 +744,7 @@ def _validate_timestamps(
             errors,
             require=require_timestamps,
             strictly_increasing=False,
+            episode_ends=episode_ends,
         )
         if values is not None:
             timestamp_values[key] = values
@@ -744,6 +762,7 @@ def _validate_timestamps(
             values=values,
             max_step=timestamp_max_step,
             errors=errors,
+            episode_ends=episode_ends,
         )
     if base is not None:
         for key, values in timestamp_values.items():
@@ -962,6 +981,7 @@ def validate_gaze_wam_zarr(
             require_timestamps=require_timestamps,
             timestamp_max_delta=timestamp_max_delta,
             timestamp_max_step=timestamp_max_step,
+            episode_ends=episode_ends,
         )
 
         if dataset_type == "robot":

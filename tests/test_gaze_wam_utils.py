@@ -9175,6 +9175,44 @@ def test_validate_gaze_wam_zarr_timestamp_alignment():
         assert any("timestamp" in message for message in missing["errors"])
 
 
+def test_validate_gaze_wam_zarr_timestamp_steps_ignore_episode_boundaries():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        robot_path = _write_linear_action_zarr(Path(tmpdir) / "robot.zarr", length=6)
+        _add_timestamp_arrays(robot_path)
+        root = zarr.open(str(robot_path), mode="a")
+        _replace_zarr_array(root["meta"], "episode_ends", np.asarray([3, 6], dtype=np.int64))
+        for key in (
+            "timestamp",
+            "image_timestamp",
+            "robot_state_timestamp",
+            "action_timestamp",
+            "gaze_timestamp",
+        ):
+            values = np.asarray(root[f"data/{key}"][:], dtype=np.float64)
+            values[3:] += 100.0
+            root[f"data/{key}"][:] = values
+
+        summary = validate_gaze_wam_zarr(
+            dataset_path=str(robot_path),
+            dataset_type="robot",
+            n_obs_steps=2,
+            action_horizon=3,
+            image_size=(16, 16),
+            heatmap_token_grid=(4, 4),
+            timestamp_key="timestamp",
+            image_timestamp_key="image_timestamp",
+            robot_state_timestamp_key="robot_state_timestamp",
+            action_timestamp_key="action_timestamp",
+            gaze_timestamp_key="gaze_timestamp",
+            timestamp_max_delta=0.01,
+            timestamp_max_step=0.06,
+        )
+
+        assert summary["valid"] is True
+        assert summary["timestamps"]["intervals"]["timestamp"]["count"] == 4
+        assert summary["timestamps"]["intervals"]["timestamp"]["max_step"] <= 0.051
+
+
 def test_validate_gaze_wam_zarr_rejects_invalid_point_gaze():
     with tempfile.TemporaryDirectory() as tmpdir:
         root = Path(tmpdir)
