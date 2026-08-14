@@ -8914,11 +8914,20 @@ def test_validate_gaze_wam_zarr_checks_optional_presence_masks():
             heatmap_token_grid=(4, 4),
             check_dataset_sample=False,
         )
-        assert no_heatmap_summary["valid"] is False
-        assert any(
-            "has_gaze_label marks 1 dense-heatmap-only row" in message
-            for message in no_heatmap_summary["errors"]
+        assert no_heatmap_summary["valid"] is True
+
+        missing_gaze_dataset = GazeWamRobotDataset(
+            dataset_path=str(no_heatmap_path),
+            n_obs_steps=2,
+            action_horizon=3,
+            image_size=(16, 16),
+            heatmap_token_grid=(4, 4),
         )
+        missing_gaze_sample = missing_gaze_dataset[1]
+        assert missing_gaze_sample["has_gaze_label"].item() is False
+        assert missing_gaze_sample["use_gaze_condition"].item() is False
+        assert missing_gaze_sample["is_gaze_condition_dropped"].item() is True
+        assert torch.allclose(missing_gaze_sample["gaze_xy"], torch.zeros(2))
 
         no_point_path = _write_open_heatmap_only_zarr(Path(tmpdir) / "heatmap_with_true_mask.zarr")
         no_point_data = zarr.open(str(no_point_path), mode="a")["data"]
@@ -9211,6 +9220,48 @@ def test_validate_gaze_wam_zarr_timestamp_steps_ignore_episode_boundaries():
         assert summary["valid"] is True
         assert summary["timestamps"]["intervals"]["timestamp"]["count"] == 4
         assert summary["timestamps"]["intervals"]["timestamp"]["max_step"] <= 0.051
+
+
+def test_validate_gaze_wam_zarr_allows_independent_gaze_timestamp_gaps():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        robot_path = _write_linear_action_zarr(Path(tmpdir) / "robot.zarr", length=6)
+        _add_timestamp_arrays(robot_path)
+        root = zarr.open(str(robot_path), mode="a")
+        root["data/gaze_timestamp"][3:] += 0.2
+
+        allowed = validate_gaze_wam_zarr(
+            dataset_path=str(robot_path),
+            dataset_type="robot",
+            n_obs_steps=2,
+            action_horizon=3,
+            image_size=(16, 16),
+            heatmap_token_grid=(4, 4),
+            timestamp_key="timestamp",
+            gaze_timestamp_key="gaze_timestamp",
+            timestamp_max_step=0.06,
+            check_dataset_sample=False,
+        )
+        constrained = validate_gaze_wam_zarr(
+            dataset_path=str(robot_path),
+            dataset_type="robot",
+            n_obs_steps=2,
+            action_horizon=3,
+            image_size=(16, 16),
+            heatmap_token_grid=(4, 4),
+            timestamp_key="timestamp",
+            gaze_timestamp_key="gaze_timestamp",
+            timestamp_max_step=0.06,
+            gaze_timestamp_max_step=0.06,
+            check_dataset_sample=False,
+        )
+
+        assert allowed["valid"] is True
+        assert allowed["timestamps"]["intervals"]["gaze_timestamp"]["max_step"] > 0.2
+        assert constrained["valid"] is False
+        assert any(
+            "gaze_timestamp" in message and "max_step" in message
+            for message in constrained["errors"]
+        )
 
 
 def test_validate_gaze_wam_zarr_rejects_invalid_point_gaze():

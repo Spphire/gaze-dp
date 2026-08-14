@@ -538,18 +538,11 @@ def _validate_gaze_label_presence_consistency(
     if not isinstance(summary, dict):
         return
     true_count = summary.get("true_count")
-    false_count = summary.get("false_count")
     if isinstance(true_count, int) and true_count > 0 and not has_gaze:
         errors.append(
             "has_gaze_label marks "
             f"{true_count} row(s) with point gaze labels, but point gaze key "
             f"{gaze_key!r} is missing."
-        )
-    if isinstance(false_count, int) and false_count > 0 and not has_heatmap:
-        errors.append(
-            "has_gaze_label marks "
-            f"{false_count} dense-heatmap-only row(s), but dense heatmap key "
-            f"{heatmap_key!r} is missing."
         )
 
 
@@ -699,6 +692,7 @@ def _validate_timestamps(
     require_timestamps: bool,
     timestamp_max_delta: Optional[float],
     timestamp_max_step: Optional[float],
+    gaze_timestamp_max_step: Optional[float],
     episode_ends: Optional[np.ndarray] = None,
 ) -> Dict[str, object]:
     requested = [
@@ -757,10 +751,15 @@ def _validate_timestamps(
     alignment = {}
     intervals = {}
     for key, values in timestamp_values.items():
+        max_step = (
+            gaze_timestamp_max_step
+            if key == _as_optional_key(gaze_timestamp_key)
+            else timestamp_max_step
+        )
         intervals[key] = _summarize_timestamp_intervals(
             key=key,
             values=values,
-            max_step=timestamp_max_step,
+            max_step=max_step,
             errors=errors,
             episode_ends=episode_ends,
         )
@@ -845,6 +844,7 @@ def validate_gaze_wam_zarr(
     require_timestamps: bool = False,
     timestamp_max_delta: Optional[float] = None,
     timestamp_max_step: Optional[float] = None,
+    gaze_timestamp_max_step: Optional[float] = None,
 ) -> Dict[str, object]:
     """Validate robot/open zarr files against the Gaze-WAM dataset contract."""
     _ensure_validator_runtime()
@@ -981,6 +981,7 @@ def validate_gaze_wam_zarr(
             require_timestamps=require_timestamps,
             timestamp_max_delta=timestamp_max_delta,
             timestamp_max_step=timestamp_max_step,
+            gaze_timestamp_max_step=gaze_timestamp_max_step,
             episode_ends=episode_ends,
         )
 
@@ -1218,6 +1219,16 @@ def parse_args(argv: Optional[Sequence[str]] = None):
     parser.add_argument("--require-timestamps", action="store_true")
     parser.add_argument("--timestamp-max-delta", type=float, default=None)
     parser.add_argument("--timestamp-max-step", type=float, default=None)
+    parser.add_argument(
+        "--gaze-timestamp-max-step",
+        type=float,
+        default=None,
+        help=(
+            "Optional independent max step for the raw gaze source timeline. "
+            "By default gaze intervals are reported but are not constrained by "
+            "--timestamp-max-step because masked/interpolated gaze gaps are allowed."
+        ),
+    )
     parser.add_argument("--fail-on-warning", action="store_true")
     return parser.parse_args(argv)
 
@@ -1253,6 +1264,7 @@ def main(argv: Optional[Sequence[str]] = None):
         require_timestamps=args.require_timestamps,
         timestamp_max_delta=args.timestamp_max_delta,
         timestamp_max_step=args.timestamp_max_step,
+        gaze_timestamp_max_step=args.gaze_timestamp_max_step,
     )
     print(json.dumps(summary, indent=2, sort_keys=True))
     if not summary["valid"] or (args.fail_on_warning and summary["warnings"]):
