@@ -29,6 +29,7 @@ from diffusion_policy.model.common.normalizer import LinearNormalizer
 from diffusion_policy.model.gaze_wam.heatmap_codec import HeatmapTokenCodec
 
 SUPPORTED_IMAGE_RESIZE_MODES = ("stretch", "letterbox")
+ACTION_TARGET_START_OFFSET_STEPS = 1
 
 
 def _validate_positive_int(name: str, value: int) -> int:
@@ -150,7 +151,12 @@ def _build_sample_indices(
         episode_end = int(episode_end)
         for current_idx in range(episode_start, episode_end):
             sampled_horizon = action_horizon + n_latency_steps
-            required_end = current_idx + (sampled_horizon - 1) * action_downsample_steps + 1
+            required_end = (
+                current_idx
+                + ACTION_TARGET_START_OFFSET_STEPS
+                + (sampled_horizon - 1) * action_downsample_steps
+                + 1
+            )
             if (not action_padding) and required_end > episode_end:
                 continue
             indices.append((current_idx, episode_start, episode_end, episode_idx))
@@ -181,11 +187,17 @@ def _sample_future(
     horizon: int,
     downsample_steps: int,
 ) -> np.ndarray:
+    """Sample future rows starting at t+1, never the observation row at t."""
     target_idx = np.asarray(
-        [current_idx + i * downsample_steps for i in range(horizon)],
+        [
+            current_idx
+            + ACTION_TARGET_START_OFFSET_STEPS
+            + i * downsample_steps
+            for i in range(horizon)
+        ],
         dtype=np.int64,
     )
-    target_idx = np.clip(target_idx, current_idx, episode_end - 1)
+    target_idx = np.minimum(target_idx, episode_end - 1)
     return np.asarray(array[target_idx])
 
 

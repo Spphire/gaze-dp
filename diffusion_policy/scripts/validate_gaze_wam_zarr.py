@@ -6,6 +6,7 @@ import pathlib
 from typing import Dict, List, Optional, Sequence
 
 SUPPORTED_IMAGE_RESIZE_MODES = ("stretch", "letterbox")
+ACTION_TARGET_START_OFFSET_STEPS = 1
 
 
 def _ensure_validator_runtime():
@@ -190,8 +191,13 @@ def _episode_length_summary(
     required_obs = int(n_obs_steps)
     required_action = int(action_horizon + n_latency_steps)
     num_short_obs = int(np.sum(lengths < required_obs))
-    num_short_action = int(np.sum(lengths < required_action))
-    unpadded_action_starts = np.maximum(lengths - required_action + 1, 0)
+    num_short_action = int(
+        np.sum(lengths < required_action + ACTION_TARGET_START_OFFSET_STEPS)
+    )
+    unpadded_action_starts = np.maximum(
+        lengths - required_action - ACTION_TARGET_START_OFFSET_STEPS + 1,
+        0,
+    )
     if num_short_obs > 0:
         warnings.append(
             f"{num_short_obs} episode(s) are shorter than n_obs_steps={required_obs}; "
@@ -199,8 +205,9 @@ def _episode_length_summary(
         )
     if num_short_action > 0:
         warnings.append(
-            f"{num_short_action} episode(s) are shorter than action_horizon+n_latency_steps="
-            f"{required_action}; dataset padding will repeat future actions."
+            f"{num_short_action} episode(s) do not contain an observation row plus "
+            f"action_horizon+n_latency_steps={required_action} future rows; dataset "
+            "padding will repeat future actions."
         )
     if int(unpadded_action_starts.sum()) == 0:
         warnings.append(
@@ -214,6 +221,7 @@ def _episode_length_summary(
         "mean": float(lengths.mean()),
         "required_obs_steps": required_obs,
         "required_action_steps": required_action,
+        "action_target_start_offset_steps": ACTION_TARGET_START_OFFSET_STEPS,
         "num_short_for_obs": num_short_obs,
         "num_short_for_action": num_short_action,
         "num_unpadded_action_starts": int(unpadded_action_starts.sum()),

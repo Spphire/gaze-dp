@@ -6,7 +6,7 @@ name: train_gaze_wam_open_only
 exp_name: "open_only_frozen_cosmos_heatmap_codec_fullres"
 
 task:
-  open_dataset_path: data/hot3d_open.zarr
+  open_dataset_path: data/hot3d_open_train.zarr
 
 policy:
   action_loss_weight: 0.0

@@ -2199,6 +2199,9 @@ def test_gaze_wam_ablation_workspace_config_switches():
     assert main_cfg.checkpoint.topk.monitor_key == "val_robot_loss"
     assert main_cfg.task.robot_gaze_dropout_prob == 0.2
     assert main_cfg.task.robot_heatmap_on_gaze_dropout is True
+    assert main_cfg.task.val_ratio == 0.0
+    assert main_cfg.task.robot_dataset.image_resize_mode == "letterbox"
+    assert main_cfg.task.open_dataset.image_resize_mode == "stretch"
     assert main_cfg.policy.use_block_attention_mask is True
     assert main_cfg.policy.heatmap_objective == "dsnt_js"
     assert main_cfg.policy.heatmap_token_kl_loss_weight == 0.0
@@ -2955,8 +2958,11 @@ def test_gaze_wam_debug_workspace_logs_validation_metrics():
         assert contract["data"]["requires_robot_train_samples"] is True
         assert contract["data"]["requires_open_train_samples"] is True
         assert contract["data"]["allows_empty_validation_sets"] is True
-        assert contract["checks"]["image_resize_mode_stretch"] is True
-        assert contract["checks"]["image_resize_mode_consistent"] is True
+        assert contract["data"]["action_target_start_offset_steps"] == 1
+        assert contract["data"]["action_chunk_semantics"] == (
+            "state@(t+1...t+H) relative to the latest observed state@t"
+        )
+        assert contract["checks"]["image_resize_modes_supported"] is True
         assert contract["checks"]["robot_image_size_matches_task"] is True
         assert contract["checks"]["open_image_size_matches_task"] is True
         assert contract["checks"]["robot_sampling_matches_task"] is True
@@ -8679,7 +8685,8 @@ def test_validate_gaze_wam_zarr_robot_open_and_missing_key():
         assert robot_summary["sample"]["use_gaze_condition"] is True
         assert robot_summary["sample"]["is_gaze_condition_dropped"] is False
         assert robot_summary["episode_lengths"]["lengths"] == [6]
-        assert robot_summary["episode_lengths"]["num_unpadded_action_starts"] == 4
+        assert robot_summary["episode_lengths"]["num_unpadded_action_starts"] == 3
+        assert robot_summary["episode_lengths"]["action_target_start_offset_steps"] == 1
         assert robot_summary["image"]["layout"] == "NHWC"
         assert robot_summary["image"]["range_kind"] == "uint8_0_255_like"
         assert robot_summary["image"]["min"] == 0.0
@@ -10063,7 +10070,34 @@ def test_prepare_robot_gaze_wam_zarr_threads_timestamp_validation_options():
         assert any("max_step" in message for message in summary["validation"]["errors"])
 
 
-def test_gaze_wam_robot_dataset_latency_matches_umi_action_drop():
+def test_gaze_wam_robot_dataset_action_chunk_starts_after_observation():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        robot_path = _write_linear_action_zarr(Path(tmpdir) / "robot.zarr", length=8)
+        dataset = GazeWamRobotDataset(
+            dataset_path=str(robot_path),
+            n_obs_steps=2,
+            action_horizon=3,
+            n_latency_steps=0,
+            image_size=(16, 16),
+            heatmap_token_grid=(4, 4),
+            action_padding=False,
+        )
+
+        sample = dataset[1]
+
+        assert len(dataset) == 5
+        assert torch.allclose(
+            sample["action_abs"][:, 0],
+            torch.tensor([2.0, 3.0, 4.0]),
+        )
+        assert torch.allclose(sample["action_base_abs"][0], torch.tensor(1.0))
+        assert torch.allclose(
+            sample["action"][:, 0],
+            torch.tensor([1.0, 2.0, 3.0]),
+        )
+
+
+def test_gaze_wam_robot_dataset_latency_skips_future_action_rows():
     with tempfile.TemporaryDirectory() as tmpdir:
         robot_path = _write_linear_action_zarr(Path(tmpdir) / "robot.zarr", length=8)
         dataset = GazeWamRobotDataset(
@@ -10078,12 +10112,12 @@ def test_gaze_wam_robot_dataset_latency_matches_umi_action_drop():
 
         sample = dataset[1]
 
-        assert len(dataset) == 4
+        assert len(dataset) == 3
         assert sample["action_abs"].shape == (3, 10)
         assert sample["action_base_abs"].shape == (10,)
         assert torch.allclose(
             sample["action_abs"][:, 0],
-            torch.tensor([3.0, 4.0, 5.0]),
+            torch.tensor([4.0, 5.0, 6.0]),
         )
         assert torch.allclose(sample["action_base_abs"][0], torch.tensor(1.0))
         assert torch.allclose(
@@ -10111,11 +10145,11 @@ def test_gaze_wam_robot_dataset_composes_pose_only_action_with_gripper():
         assert sample["action"].shape == (3, 10)
         assert torch.allclose(
             sample["action_abs"][:, 0],
-            torch.tensor([3.0, 4.0, 5.0]),
+            torch.tensor([4.0, 5.0, 6.0]),
         )
         assert torch.allclose(
             sample["action_abs"][:, 9],
-            torch.tensor([0.03, 0.04, 0.05]),
+            torch.tensor([0.04, 0.05, 0.06]),
         )
         assert torch.allclose(sample["action"][:, 9], sample["action_abs"][:, 9])
 
@@ -10324,7 +10358,7 @@ def test_gaze_wam_dataset_validation_split_is_episode_level_and_stable():
         assert open_train_episodes.isdisjoint(open_val_episodes)
         assert open_train_episodes | open_val_episodes == {0, 1, 2, 3}
         assert len(robot_dataset) + len(robot_val) == sum(
-            max(0, length - 1) for length in (4, 5, 6, 7)
+            max(0, length - 2) for length in (4, 5, 6, 7)
         )
 
 
@@ -10382,6 +10416,29 @@ def test_gaze_wam_dataset_rejects_invalid_val_ratio():
                 assert "seed must be a non-negative integer" in str(exc)
             else:
                 raise AssertionError(f"Expected invalid seed={bad_seed!r} to fail.")
+
+
+def test_gaze_wam_dataset_val_ratio_zero_uses_all_episodes_for_training():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        robot_path = _write_multi_episode_gaze_wam_zarr(
+            Path(tmpdir) / "robot.zarr",
+            include_action=True,
+            episode_lengths=(4, 5, 6),
+        )
+        dataset = GazeWamRobotDataset(
+            dataset_path=str(robot_path),
+            n_obs_steps=2,
+            action_horizon=2,
+            image_size=(16, 16),
+            heatmap_token_grid=(4, 4),
+            action_padding=False,
+            val_ratio=0.0,
+        )
+        val_dataset = dataset.get_validation_dataset()
+
+        assert set(dataset.indices[:, 3].tolist()) == {0, 1, 2}
+        assert len(dataset) == sum(length - 2 for length in (4, 5, 6))
+        assert len(val_dataset) == 0
 
 
 def test_convert_open_gaze_manifest_point_labels_to_zarr():
@@ -13211,6 +13268,7 @@ def test_preflight_gaze_wam_debug_config_runs_loss_smoke(tmp_path):
             "robot_dataset": [256, 256],
             "open_dataset": [256, 256],
         },
+        "supported": True,
         "all_stretch": True,
         "consistent": True,
         "image_size_consistent": True,
@@ -13874,7 +13932,7 @@ def test_preflight_gaze_wam_policy_contract_checks_local_dino_path_types():
     assert any("cache_dir must point to a directory" in error for error in errors)
 
 
-def test_preflight_gaze_wam_blocks_geometry_mismatch():
+def test_preflight_gaze_wam_allows_source_resize_modes_but_blocks_size_mismatch():
     summary = preflight_gaze_wam(
         config_name="train_gaze_wam_debug_workspace",
         overrides=[
@@ -13895,9 +13953,9 @@ def test_preflight_gaze_wam_blocks_geometry_mismatch():
     assert summary["image_geometry"]["open_image_size"] == [256, 256]
     assert summary["image_geometry"]["all_stretch"] is False
     assert summary["image_geometry"]["consistent"] is False
+    assert summary["image_geometry"]["supported"] is True
     assert summary["image_geometry"]["image_size_consistent"] is False
-    assert any("image_resize_mode must be 'stretch'" in error for error in summary["errors"])
-    assert any("must use the same image_resize_mode" in error for error in summary["errors"])
+    assert not any("image_resize_mode" in error for error in summary["errors"])
     assert any("image_size" in error and "must match" in error for error in summary["errors"])
 
 
@@ -13926,6 +13984,13 @@ def test_preflight_gaze_wam_geometry_summary_uses_strict_integer_parser():
     assert summary["robot_image_size"] == [256, 256]
     assert summary["open_image_size"] == [256, 256]
     assert summary["image_size_consistent"] is True
+
+    mixed_mode_cfg = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
+    mixed_mode_cfg.task.robot_dataset.image_resize_mode = "letterbox"
+    mixed_mode_summary = preflight_gaze_wam_module._image_geometry_summary(mixed_mode_cfg)
+    assert mixed_mode_summary["supported"] is True
+    assert mixed_mode_summary["consistent"] is False
+    assert preflight_gaze_wam_module._check_image_geometry_contract(mixed_mode_summary) == []
 
     invalid_overrides = [
         ("task.image_shape", [3, 256.5, 256], "task.image_shape[1]"),
@@ -14639,13 +14704,13 @@ def test_real_data_readiness_blocks_zarr_metadata_mismatch():
             robot_path,
             "open",
             image_size=(224, 224),
-            image_resize_mode="letterbox",
+            image_resize_mode="stretch",
         )
         _write_real_data_readiness_zarr_metadata(
             open_path,
             "robot",
             image_size=(128, 256),
-            image_resize_mode="stretch",
+            image_resize_mode="letterbox",
         )
         dino_cache.mkdir()
         (dino_cache / "fake_dinov3_cache.bin").write_bytes(b"fake-local-dinov3-cache")
@@ -14690,6 +14755,7 @@ def test_real_data_readiness_blocks_zarr_metadata_mismatch():
     assert "robot_zarr_metadata_image_resize_mode" in failed_names
     assert "robot_zarr_metadata_image_size" in failed_names
     assert "open_zarr_metadata_dataset_type" in failed_names
+    assert "open_zarr_metadata_image_resize_mode" in failed_names
     assert "open_zarr_metadata_image_size" in failed_names
     assert readiness["zarr_metadata"]["robot"]["metadata_attrs"]["dataset_type"] == "open"
     assert readiness["zarr_metadata"]["open"]["metadata_attrs"]["dataset_type"] == "robot"
@@ -15426,12 +15492,12 @@ def test_real_data_readiness_blocks_geometry_mismatch():
         if not check["ok"]
     }
     assert readiness["ok"] is False
-    assert "image_resize_mode_stretch" in failed_names
-    assert "image_resize_mode_consistent" in failed_names
+    assert "image_resize_modes_supported" not in failed_names
     assert "image_size_consistent" in failed_names
     assert "robot_sampling_matches_task" in failed_names
     assert "open_sampling_matches_task" in failed_names
-    assert any("letterbox" in error for error in readiness["errors"])
+    assert not any("requires direct-stretch" in error for error in readiness["errors"])
+    assert not any("share the same image_resize_mode" in error for error in readiness["errors"])
     assert any("image_size" in error and "must match" in error for error in readiness["errors"])
     assert any("robot dataset n_obs_steps" in error for error in readiness["errors"])
     assert any("open dataset n_obs_steps" in error for error in readiness["errors"])

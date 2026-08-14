@@ -12,6 +12,8 @@ ROOT_DIR = pathlib.Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+SUPPORTED_PREALIGNED_IMAGE_RESIZE_MODES = ("stretch", "letterbox")
+
 
 def _command_to_string(command: Sequence[str]) -> str:
     return " ".join(shlex.quote(str(part)) for part in command)
@@ -406,6 +408,8 @@ def _read_data_onboarding_review(
     preflight_require_timestamps: bool,
     preflight_timestamp_max_delta: Optional[float],
     preflight_timestamp_max_step: Optional[float],
+    robot_image_resize_mode: Optional[str] = None,
+    open_image_resize_mode: Optional[str] = None,
 ) -> Dict[str, object]:
     summary: Dict[str, object] = {
         "enabled": bool(path),
@@ -553,12 +557,22 @@ def _read_data_onboarding_review(
                 f"expected {[int(v) for v in image_size]!r}."
             ),
         )
+        expected_robot_resize_mode = str(robot_image_resize_mode or image_resize_mode)
+        expected_open_resize_mode = str(open_image_resize_mode or image_resize_mode)
+        reported_robot_resize_mode = str(
+            contract.get("robot_image_resize_mode", contract.get("image_resize_mode", ""))
+        )
+        reported_open_resize_mode = str(
+            contract.get("open_image_resize_mode", contract.get("image_resize_mode", ""))
+        )
         add_check(
             "data_onboarding_review_resize_mode_matches_config",
-            str(contract.get("image_resize_mode", "")) == str(image_resize_mode),
+            reported_robot_resize_mode == expected_robot_resize_mode
+            and reported_open_resize_mode == expected_open_resize_mode,
             (
-                "Data onboarding review image_resize_mode must match the launch config; "
-                f"expected {image_resize_mode!r}."
+                "Data onboarding review source image_resize_mode values must match the launch "
+                f"config; expected robot={expected_robot_resize_mode!r}, "
+                f"open={expected_open_resize_mode!r}."
             ),
         )
         add_check(
@@ -851,6 +865,8 @@ def check_real_data_readiness(
         preflight_require_timestamps=preflight_require_timestamps,
         preflight_timestamp_max_delta=preflight_timestamp_max_delta,
         preflight_timestamp_max_step=preflight_timestamp_max_step,
+        robot_image_resize_mode=robot_resize_mode,
+        open_image_resize_mode=open_resize_mode,
     )
     training_config = validate_gaze_wam_training_config(cfg)
     task_routing_config = validate_gaze_wam_task_routing_config(cfg)
@@ -1070,10 +1086,11 @@ def check_real_data_readiness(
     )
     add_check(
         "robot_zarr_metadata_image_resize_mode",
-        str(robot_zarr_attrs.get("image_resize_mode", "")) == str(task_resize_mode),
+        str(robot_zarr_attrs.get("image_resize_mode", "")) == str(robot_resize_mode),
         (
             "Real-data launch robot zarr meta.attrs.image_resize_mode must match the task "
-            f"resize mode {task_resize_mode!r}; got {robot_zarr_attrs.get('image_resize_mode')!r}."
+            f"resize mode {robot_resize_mode!r}; got "
+            f"{robot_zarr_attrs.get('image_resize_mode')!r}."
         ),
     )
     add_check(
@@ -1112,10 +1129,11 @@ def check_real_data_readiness(
     )
     add_check(
         "open_zarr_metadata_image_resize_mode",
-        str(open_zarr_attrs.get("image_resize_mode", "")) == str(task_resize_mode),
+        str(open_zarr_attrs.get("image_resize_mode", "")) == str(open_resize_mode),
         (
             "Real-data launch open-source zarr meta.attrs.image_resize_mode must match the task "
-            f"resize mode {task_resize_mode!r}; got {open_zarr_attrs.get('image_resize_mode')!r}."
+            f"resize mode {open_resize_mode!r}; got "
+            f"{open_zarr_attrs.get('image_resize_mode')!r}."
         ),
     )
     add_check(
@@ -1151,19 +1169,14 @@ def check_real_data_readiness(
         ),
     )
     add_check(
-        "image_resize_mode_stretch",
-        all(value == "stretch" for value in resize_modes.values()),
-        (
-            "Real-data launch requires direct-stretch image geometry for task, robot dataset, "
-            f"and open dataset; got {resize_modes!r}."
+        "image_resize_modes_supported",
+        all(
+            value in SUPPORTED_PREALIGNED_IMAGE_RESIZE_MODES
+            for value in resize_modes.values()
         ),
-    )
-    add_check(
-        "image_resize_mode_consistent",
-        len(set(resize_modes.values())) == 1,
         (
-            "Real-data launch requires task, robot dataset, and open dataset to share the same "
-            f"image_resize_mode; got {resize_modes!r}."
+            "Real-data launch requires each source to use pre-aligned 'stretch' or "
+            f"'letterbox' geometry; got {resize_modes!r}."
         ),
     )
     add_check(

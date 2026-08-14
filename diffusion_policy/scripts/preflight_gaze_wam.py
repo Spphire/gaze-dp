@@ -11,6 +11,8 @@ ROOT_DIR = pathlib.Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+SUPPORTED_PREALIGNED_IMAGE_RESIZE_MODES = ("stretch", "letterbox")
+
 
 def _shape(value) -> object:
     _ensure_preflight_runtime()
@@ -383,6 +385,10 @@ def _image_geometry_summary(cfg) -> Dict[str, object]:
         "open_image_resize_mode": open_resize_mode,
         "resize_modes": resize_modes,
         "image_sizes": image_sizes,
+        "supported": all(
+            mode in SUPPORTED_PREALIGNED_IMAGE_RESIZE_MODES
+            for mode in resize_modes.values()
+        ),
         "all_stretch": all(mode == "stretch" for mode in resize_modes.values()),
         "consistent": len(set(resize_modes.values())) == 1,
         "image_size_consistent": (
@@ -394,15 +400,10 @@ def _image_geometry_summary(cfg) -> Dict[str, object]:
 def _check_image_geometry_contract(geometry: Dict[str, object]) -> Sequence[str]:
     errors = []
     resize_modes = geometry["resize_modes"]
-    if not geometry["all_stretch"]:
+    if not geometry["supported"]:
         errors.append(
-            "Gaze-WAM image_resize_mode must be 'stretch' for task, robot dataset, "
-            f"and open dataset; got {resize_modes!r}."
-        )
-    if not geometry["consistent"]:
-        errors.append(
-            "Gaze-WAM task, robot dataset, and open dataset must use the same "
-            f"image_resize_mode; got {resize_modes!r}."
+            "Gaze-WAM image_resize_mode must describe pre-aligned 'stretch' or "
+            f"'letterbox' data; got {resize_modes!r}."
         )
     if not geometry["image_size_consistent"]:
         errors.append(

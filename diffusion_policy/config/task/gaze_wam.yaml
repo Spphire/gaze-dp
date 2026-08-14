@@ -2,11 +2,16 @@ name: gaze_wam
 
 image_size: [256, 256]
 image_shape: [3, 256, 256]
+# Legacy fallback for tools that only expose one resize-mode field. The source
+# dataset contracts below are authoritative because RGB and gaze are already
+# pre-aligned in each zarr before training.
 image_resize_mode: stretch
+robot_image_resize_mode: letterbox
+open_image_resize_mode: stretch
 # Canonical robot rows come from the Collector's aligned 30 Hz fusion timeline.
 robot_sample_fps: 30.0
-robot_dataset_path: data/gaze_wam_robot.zarr
-open_dataset_path: data/gaze_wam_open.zarr
+robot_dataset_path: data/gaze_wam_robot_20260813_after_162120.zarr
+open_dataset_path: data/hot3d_open_train.zarr
 
 n_obs_steps: 2
 n_latency_steps: 0
@@ -31,7 +36,7 @@ temporal_heatmap_beta: 10.0
 temporal_heatmap_sigma_px: 6.0
 temporal_heatmap_current_weight: 1.0
 seed: 42
-val_ratio: 0.02
+val_ratio: 0.0
 
 camera_key: camera0_rgb
 gaze_key: gaze_xy
@@ -69,7 +74,7 @@ robot_dataset:
   action_downsample_steps: ${task.action_downsample_steps}
   action_horizon: ${task.action_horizon}
   image_size: ${task.image_size}
-  image_resize_mode: ${task.image_resize_mode}
+  image_resize_mode: ${task.robot_image_resize_mode}
   heatmap_token_grid: ${task.heatmap_token_grid}
   heatmap_dim: ${task.heatmap_dim}
   heatmap_sigma_tokens: ${task.heatmap_sigma_tokens}
@@ -99,7 +104,7 @@ open_dataset:
   action_horizon: ${task.action_horizon}
   action_dim: ${task.action_dim}
   image_size: ${task.image_size}
-  image_resize_mode: ${task.image_resize_mode}
+  image_resize_mode: ${task.open_image_resize_mode}
   heatmap_token_grid: ${task.heatmap_token_grid}
   heatmap_dim: ${task.heatmap_dim}
   heatmap_sigma_tokens: ${task.heatmap_sigma_tokens}

@@ -58,6 +58,7 @@ from diffusion_policy.common.normalize_util import get_image_identity_normalizer
 from diffusion_policy.common.pytorch_util import dict_apply
 from diffusion_policy.dataset.gaze_wam_mixing import build_gaze_wam_mixed_batch
 from diffusion_policy.dataset.gaze_wam_batching import build_gaze_wam_dataloader
+from diffusion_policy.dataset.gaze_wam_dataset import ACTION_TARGET_START_OFFSET_STEPS
 from diffusion_policy.common.gaze_wam_transfer import (
     export_gaze_wam_transfer_artifact,
     load_gaze_wam_transfer_artifact,
@@ -74,6 +75,8 @@ from diffusion_policy.policy.gaze_wam_policy import GazeWamPolicy
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
 
 register_safe_omegaconf_resolvers()
+
+SUPPORTED_PREALIGNED_IMAGE_RESIZE_MODES = ("stretch", "letterbox")
 
 
 def _to_float(value):
@@ -1076,10 +1079,10 @@ def _build_training_contract_summary(
         ),
         "robot_heatmap_on_gaze_dropout": robot_heatmap_on_gaze_dropout,
         "image_shape_256": image_shape == [3, 256, 256],
-        "image_resize_mode_stretch": all(
-            mode == "stretch" for mode in image_resize_modes.values()
+        "image_resize_modes_supported": all(
+            mode in SUPPORTED_PREALIGNED_IMAGE_RESIZE_MODES
+            for mode in image_resize_modes.values()
         ),
-        "image_resize_mode_consistent": len(set(image_resize_modes.values())) == 1,
         "robot_image_size_matches_task": robot_image_size == task_image_size,
         "open_image_size_matches_task": open_image_size == task_image_size,
         "n_obs_steps_2": n_obs_steps == 2,
@@ -1333,6 +1336,10 @@ def _build_training_contract_summary(
             "requires_robot_train_samples": use_robot_data,
             "requires_open_train_samples": use_open_data,
             "allows_empty_validation_sets": True,
+            "action_target_start_offset_steps": ACTION_TARGET_START_OFFSET_STEPS,
+            "action_chunk_semantics": (
+                "state@(t+1...t+H) relative to the latest observed state@t"
+            ),
         },
         "data_sources": {
             "image_resize_modes": image_resize_modes,
