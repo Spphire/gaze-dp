@@ -2125,7 +2125,7 @@ def test_gaze_wam_debug_config_instantiates_policy_contract():
     assert policy.gaze_encoder.mask_token.shape == (1, 1, 768)
     assert policy.model.n_emb == 768
     assert policy.model.action_dim == 10
-    assert policy.model.action_horizon == 16
+    assert policy.model.action_horizon == 48
     assert policy.model.heatmap_num_tokens == 256
     assert policy.model.heatmap_dim == 16
     assert policy.model.max_image_tokens >= 512
@@ -3042,7 +3042,7 @@ def test_gaze_wam_debug_workspace_logs_validation_metrics():
         assert contract["optional_metadata"]["samples"]["robot_train"]["available"] is True
         assert contract["optional_metadata"]["samples"]["robot_train"]["optional_shapes"][
             "action_abs"
-        ] == [16, 10]
+        ] == [48, 10]
         assert contract["optional_metadata"]["samples"]["robot_train"]["optional_shapes"][
             "action_base_abs"
         ] == [10]
@@ -3093,13 +3093,13 @@ def test_gaze_wam_debug_workspace_logs_validation_metrics():
         assert contract["sampling"] == {
             "task": {
                 "n_obs_steps": 2,
-                "action_horizon": 16,
+                "action_horizon": 48,
                 "n_latency_steps": 0,
             },
             "robot_dataset": {
                 "n_obs_steps": 2,
                 "obs_downsample_steps": 1,
-                "action_horizon": 16,
+                "action_horizon": 48,
                 "n_latency_steps": 0,
                 "action_downsample_steps": 1,
                 "action_padding": True,
@@ -3107,7 +3107,7 @@ def test_gaze_wam_debug_workspace_logs_validation_metrics():
             "open_dataset": {
                 "n_obs_steps": 2,
                 "obs_downsample_steps": 1,
-                "action_horizon": 16,
+                "action_horizon": 48,
                 "n_latency_steps": 0,
                 "action_downsample_steps": 1,
                 "action_padding": True,
@@ -13347,13 +13347,13 @@ def test_preflight_gaze_wam_debug_config_runs_loss_smoke(tmp_path):
     assert summary["sampling_contract"] == {
         "task": {
             "n_obs_steps": 2,
-            "action_horizon": 16,
+            "action_horizon": 48,
             "n_latency_steps": 0,
         },
         "robot_dataset": {
             "n_obs_steps": 2,
             "obs_downsample_steps": 1,
-            "action_horizon": 16,
+            "action_horizon": 48,
             "n_latency_steps": 0,
             "action_downsample_steps": 1,
             "action_padding": True,
@@ -13361,7 +13361,7 @@ def test_preflight_gaze_wam_debug_config_runs_loss_smoke(tmp_path):
         "open_dataset": {
             "n_obs_steps": 2,
             "obs_downsample_steps": 1,
-            "action_horizon": 16,
+            "action_horizon": 48,
             "n_latency_steps": 0,
             "action_downsample_steps": 1,
             "action_padding": True,
@@ -13373,7 +13373,7 @@ def test_preflight_gaze_wam_debug_config_runs_loss_smoke(tmp_path):
     assert summary["config"]["robot_dataset_sampling"] == {
         "n_obs_steps": 2,
         "obs_downsample_steps": 1,
-        "action_horizon": 16,
+        "action_horizon": 48,
         "n_latency_steps": 0,
         "action_downsample_steps": 1,
         "action_padding": True,
@@ -13381,7 +13381,7 @@ def test_preflight_gaze_wam_debug_config_runs_loss_smoke(tmp_path):
     assert summary["config"]["open_dataset_sampling"] == {
         "n_obs_steps": 2,
         "obs_downsample_steps": 1,
-        "action_horizon": 16,
+        "action_horizon": 48,
         "n_latency_steps": 0,
         "action_downsample_steps": 1,
         "action_padding": True,
@@ -13426,7 +13426,7 @@ def test_preflight_gaze_wam_debug_config_runs_loss_smoke(tmp_path):
     )
     assert summary["data_stream_contract"]["mixing"]["robot_ratio_per_process"] == 0.75
     assert summary["data_stream_contract"]["mixing"]["open_ratio_per_process"] == 0.25
-    assert summary["robot_dataset"]["sample"]["action_abs"] == [16, 10]
+    assert summary["robot_dataset"]["sample"]["action_abs"] == [48, 10]
     assert summary["robot_dataset"]["sample"]["action_base_abs"] == [10]
     if "heatmap_image" in summary["open_dataset"]["sample"]:
         assert summary["open_dataset"]["sample"]["heatmap_image"][-2:] == [256, 256]
@@ -13471,7 +13471,7 @@ def test_preflight_gaze_wam_debug_config_runs_loss_smoke(tmp_path):
     assert summary["policy_contract"]["gaze_mask_token_shape"] == [1, 1, 768]
     assert summary["policy_contract"]["gaze_encoder_grid"] == [8, 8]
     assert summary["policy_contract"]["model_action_dim"] == 10
-    assert summary["policy_contract"]["model_action_horizon"] == 16
+    assert summary["policy_contract"]["model_action_horizon"] == 48
     assert summary["policy_contract"]["model_heatmap_num_tokens"] == 256
     assert summary["policy_contract"]["action_head_out_features"] == 10
     assert summary["policy_contract"]["model_heatmap_dim"] == 16
@@ -13497,10 +13497,10 @@ def test_preflight_gaze_wam_debug_config_runs_loss_smoke(tmp_path):
         "use_block_attention_mask": True,
         "num_image_tokens": 512,
         "gaze_token_count": 1,
-        "action_horizon": 16,
+        "action_horizon": 48,
         "heatmap_num_tokens": 256,
-        "train_sequence_tokens": 785,
-        "inference_sequence_tokens": 529,
+        "train_sequence_tokens": 817,
+        "inference_sequence_tokens": 561,
         "condition_reads_targets": False,
         "action_reads_heatmap": False,
         "heatmap_reads_action": False,
@@ -13598,7 +13598,7 @@ def test_preflight_gaze_wam_debug_config_runs_loss_smoke(tmp_path):
     assert summary["policy_contract"]["robot_ratio"] == 0.75
     assert summary["policy_contract"]["open_ratio"] == 0.25
     assert summary["loss_smoke"]["mixed_batch_size"] == 4
-    assert summary["loss_smoke"]["mixed_action"] == [4, 16, 10]
+    assert summary["loss_smoke"]["mixed_action"] == [4, 48, 10]
     assert summary["loss_smoke"]["mixed_heatmap"] == [4, 1, 256, 16]
     assert summary["loss_smoke"]["action_loss_mask_count"] == 3.0
     assert summary["loss_smoke"]["heatmap_loss_mask_count"] >= 1.0
@@ -14095,7 +14095,7 @@ def test_preflight_gaze_wam_blocks_dataset_sampling_mismatch():
     assert summary["ok"] is False
     assert summary["sampling_contract"]["task"] == {
         "n_obs_steps": 2,
-        "action_horizon": 16,
+        "action_horizon": 48,
         "n_latency_steps": 0,
     }
     assert summary["sampling_contract"]["robot_dataset"]["action_horizon"] == 8
@@ -14519,7 +14519,11 @@ def test_real_data_readiness_accepts_full_gated_launch_settings():
         robot_path = root / "real_robot.zarr"
         open_path = root / "real_open.zarr"
         dino_cache = root / "dino_cache"
-        _write_real_data_readiness_zarr_metadata(robot_path, "robot")
+        _write_real_data_readiness_zarr_metadata(
+            robot_path,
+            "robot",
+            image_resize_mode="letterbox",
+        )
         _write_real_data_readiness_zarr_metadata(open_path, "open")
         dino_cache.mkdir()
         (dino_cache / "fake_dinov3_cache.bin").write_bytes(b"fake-local-dinov3-cache")
@@ -14628,7 +14632,11 @@ def test_real_data_readiness_accepts_matching_data_onboarding_review():
         open_path = root / "real_open.zarr"
         dino_cache = root / "dino_cache"
         review_path = root / "onboarding_review.json"
-        _write_real_data_readiness_zarr_metadata(robot_path, "robot")
+        _write_real_data_readiness_zarr_metadata(
+            robot_path,
+            "robot",
+            image_resize_mode="letterbox",
+        )
         _write_real_data_readiness_zarr_metadata(open_path, "open")
         dino_cache.mkdir()
         (dino_cache / "fake_dinov3_cache.bin").write_bytes(b"fake-local-dinov3-cache")
@@ -14643,8 +14651,10 @@ def test_real_data_readiness_accepts_matching_data_onboarding_review():
                     "contract": {
                         "image_size": [256, 256],
                         "image_resize_mode": "stretch",
+                        "robot_image_resize_mode": "letterbox",
+                        "open_image_resize_mode": "stretch",
                         "n_obs_steps": 2,
-                        "action_horizon": 16,
+                        "action_horizon": 48,
                         "n_latency_steps": 0,
                         "heatmap_token_grid": [16, 16],
                         "require_timestamps": True,
@@ -15620,7 +15630,7 @@ def test_real_data_readiness_blocks_core_contract_mismatch():
     assert readiness["ok"] is False
     assert "image_shape_256" in failed_names
     assert "n_obs_steps_2" in failed_names
-    assert "action_horizon_16" in failed_names
+    assert "action_horizon_48" in failed_names
     assert "n_latency_steps_0" in failed_names
     assert "action_dim_10" in failed_names
     assert "heatmap_token_grid_16x16" in failed_names

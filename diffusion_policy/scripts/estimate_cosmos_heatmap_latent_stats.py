@@ -192,7 +192,7 @@ def estimate_cosmos_heatmap_latent_stats(
     token_grid: Sequence[int] = (16, 16),
     latent_channels: int = 16,
     sigma_px: float = 6.0,
-    action_horizon: int = 16,
+    action_horizon: int = 48,
     n_latency_steps: int = 0,
     action_downsample_steps: int = 1,
     action_padding: bool = True,

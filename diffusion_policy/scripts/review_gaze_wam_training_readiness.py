@@ -307,7 +307,7 @@ def review_gaze_wam_training_readiness(
     image_size: Sequence[int] = (256, 256),
     image_resize_mode: str = "stretch",
     n_obs_steps: int = 2,
-    action_horizon: int = 16,
+    action_horizon: int = 48,
     n_latency_steps: int = 0,
     heatmap_token_grid: Sequence[int] = (16, 16),
     preview_sample_index: int = 0,

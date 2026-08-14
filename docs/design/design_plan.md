@@ -391,7 +391,7 @@ Let:
 - `N_v_per_frame = 256`: number of image tokens per frame for the main DINOv3/16 path.
 - `N_v = T_obs * N_v_per_frame`: total image tokens after temporal flattening.
 - `N_g = 1`: gaze token count.
-- `N_a = action_horizon`, default `16`.
+- `N_a = action_horizon`, default `48`.
 - `N_h = heatmap_horizon * 256`, default `256` when `T_heatmap=1`.
 - `D`: transformer embedding dim, default inherited from the repo as `768`.
 
@@ -1512,7 +1512,7 @@ image_size: 256 x 256
 n_obs_steps: 2
 n_latency_steps: 0
 obs_downsample_steps: 1
-action_horizon: 16
+action_horizon: 48
 action_downsample_steps: 1
 action_dim: 10
 heatmap_token_grid: 16 x 16
@@ -1527,11 +1527,11 @@ model-target conversion online:
 4. Drop the first `n_latency_steps` actions; the first-run default is `0`, so nothing is skipped.
 5. Convert each absolute TCP action in the chunk into a relative action against the latest observed
    base pose, matching the UMI `relative_action=True` / `use_absolute_action=True` convention.
-6. Return this relative `[16, 10]` tensor as `batch["action"]`; keep `action_abs` and
+6. Return this relative `[48, 10]` tensor as `batch["action"]`; keep `action_abs` and
    `action_base_abs` as metadata for validation, metrics, and future inverse conversion.
 
 An open-source gaze zarr uses the same image/gaze geometry but contains no robot action
-supervision. `GazeWamOpenDataset` emits a zero `[16, 10]` action placeholder only to keep batch
+supervision. `GazeWamOpenDataset` emits a zero `[48, 10]` action placeholder only to keep batch
 shapes static; `has_action=False` prevents those rows from entering action loss. For the canonical
 DSNT+JS path, heatmap targets are generated online from `gaze_xy` inside the policy.
 
@@ -2573,7 +2573,7 @@ image_tokens_per_frame: 256
 max_obs_frames: ${n_obs_steps}
 n_emb: 768
 
-action_horizon: 16
+action_horizon: 48
 action_dim: 10
 zarr_action_storage: absolute_tcp
 action_representation: relative
@@ -2777,7 +2777,7 @@ py scripts/launch_gaze_wam_training.py \
     `checkpoint_every`, non-negative open batch size, non-negative validation/sample/GDR cadence
     values, and valid optional max-step limits;
   - the fixed main tensor/model contract: `image_shape=[3,256,256]`, `n_obs_steps=2`,
-    `action_horizon=16`, `action_dim=10`, `heatmap_token_grid=[16,16]`,
+    `action_horizon=48`, `action_dim=10`, `heatmap_token_grid=[16,16]`,
     `heatmap_num_tokens=256`, DINOv3 ViT/16 as `vit_base_patch16_dinov3`, and
     `policy.use_block_attention_mask=true`;
   - the main mixed-training contract: positive robot/open source batches with the configured

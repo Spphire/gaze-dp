@@ -1086,7 +1086,7 @@ def _build_training_contract_summary(
         "robot_image_size_matches_task": robot_image_size == task_image_size,
         "open_image_size_matches_task": open_image_size == task_image_size,
         "n_obs_steps_2": n_obs_steps == 2,
-        "action_horizon_16": action_horizon == 16,
+        "action_horizon_48": action_horizon == 48,
         "robot_sampling_matches_task": robot_sampling_matches_task,
         "open_sampling_matches_task": open_sampling_matches_task,
         "action_dim_10": action_dim == 10,

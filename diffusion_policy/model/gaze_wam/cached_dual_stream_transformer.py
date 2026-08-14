@@ -178,7 +178,7 @@ class CachedDualStreamGazeWamTransformer(nn.Module):
         self,
         action_dim: int = 10,
         heatmap_dim: int = 16,
-        action_horizon: int = 16,
+        action_horizon: int = 48,
         heatmap_num_tokens: int = 256,
         max_image_tokens: int = 512,
         n_layer: int = 7,

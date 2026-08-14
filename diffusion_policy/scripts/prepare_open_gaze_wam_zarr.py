@@ -336,7 +336,7 @@ def prepare_open_gaze_wam_zarr(
     heatmap_key: Optional[str] = "gaze_heatmap",
     overwrite: bool = False,
     n_obs_steps: int = 2,
-    action_horizon: int = 16,
+    action_horizon: int = 48,
     n_latency_steps: int = 0,
     heatmap_token_grid: Sequence[int] = (16, 16),
     require_timestamps: bool = False,

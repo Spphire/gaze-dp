@@ -154,7 +154,7 @@ robot zarr 预期存完整绝对 TCP 轨迹，读取时才切成 action chunk �
 
 - zarr 中 action 是绝对 TCP 轨迹
 - dataset 内部使用当前 obs/action base 计算 relative transform
-- 输出 action shape 为 `[action_horizon=16, action_dim=10]`
+- 输出 action shape 为 `[action_horizon=48, action_dim=10]`
 - robot row 的 `has_action=True`
 - robot row 默认 `has_heatmap=False`
 - robot row 若 `use_gaze_condition=True`，不应同时训练 heatmap

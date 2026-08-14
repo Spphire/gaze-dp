@@ -399,7 +399,7 @@ class _BaseGazeWamZarrDataset(BaseDataset):
         heatmap_key: Optional[str] = "gaze_heatmap",
         n_obs_steps: int = 2,
         obs_downsample_steps: int = 1,
-        action_horizon: int = 16,
+        action_horizon: int = 48,
         n_latency_steps: int = 0,
         action_downsample_steps: int = 1,
         image_size: Sequence[int] = (256, 256),

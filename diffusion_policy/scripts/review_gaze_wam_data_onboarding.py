@@ -116,7 +116,7 @@ def review_gaze_wam_data_onboarding(
     image_size: Sequence[int] = (256, 256),
     image_resize_mode: str = "stretch",
     n_obs_steps: int = 2,
-    action_horizon: int = 16,
+    action_horizon: int = 48,
     n_latency_steps: int = 0,
     heatmap_token_grid: Sequence[int] = (16, 16),
     require_timestamps: bool = False,

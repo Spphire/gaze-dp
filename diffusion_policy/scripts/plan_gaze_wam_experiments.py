@@ -45,7 +45,7 @@ CONTRACT_SUMMARY = {
     "image_tokens_per_frame": 256,
     "n_obs_steps": 2,
     "visual_token_count": 512,
-    "action_horizon": 16,
+    "action_horizon": 48,
     "action_dim": 10,
     "heatmap_num_tokens": 256,
     "heatmap_token_grid": "16x16",

@@ -20,7 +20,7 @@ n_obs_steps: 2
 n_latency_steps: 0
 obs_downsample_steps: 1
 action_downsample_steps: 1
-action_horizon: 16
+action_horizon: 48
 action_dim: 10
 action_representation: relative
 use_absolute_action: true

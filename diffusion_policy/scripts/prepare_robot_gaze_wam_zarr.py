@@ -197,7 +197,7 @@ def prepare_robot_gaze_wam_zarr(
     inspect_max_items: int = 32,
     inspect_top_k: int = 3,
     n_obs_steps: int = 2,
-    action_horizon: int = 16,
+    action_horizon: int = 48,
     n_latency_steps: int = 0,
     image_size: Sequence[int] = (256, 256),
     image_resize_mode: str = "stretch",

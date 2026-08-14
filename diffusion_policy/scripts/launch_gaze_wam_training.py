@@ -1198,9 +1198,9 @@ def check_real_data_readiness(
         f"Real-data launch requires task.n_obs_steps=2; got {cfg.task.n_obs_steps!r}.",
     )
     add_check(
-        "action_horizon_16",
-        task_sampling["action_horizon"] == 16,
-        f"Real-data launch requires task.action_horizon=16; got {cfg.task.action_horizon!r}.",
+        "action_horizon_48",
+        task_sampling["action_horizon"] == 48,
+        f"Real-data launch requires task.action_horizon=48; got {cfg.task.action_horizon!r}.",
     )
     add_check(
         "n_latency_steps_0",

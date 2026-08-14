@@ -929,7 +929,7 @@ def validate_gaze_wam_zarr(
     tcp_pose_key: str = "tcp_pose_abs",
     gripper_key: str = "gripper_width",
     n_obs_steps: int = 2,
-    action_horizon: int = 16,
+    action_horizon: int = 48,
     n_latency_steps: int = 0,
     image_size: Sequence[int] = (256, 256),
     image_resize_mode: str = "stretch",
