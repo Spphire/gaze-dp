@@ -628,6 +628,7 @@ def _validate_timestamp_array(
     errors: List[str],
     require: bool = False,
     strictly_increasing: bool = False,
+    check_monotonic: bool = True,
     episode_ends: Optional[np.ndarray] = None,
     scale_to_seconds: float = 1.0,
 ):
@@ -655,6 +656,8 @@ def _validate_timestamp_array(
         return values
     starts = np.concatenate([[0], episode_ends[:-1]]) if episode_ends is not None else [0]
     ends = episode_ends if episode_ends is not None else [len(values)]
+    if not check_monotonic:
+        return values
     for episode_index, (start, end) in enumerate(zip(starts, ends)):
         diffs = np.diff(values[int(start):int(end)])
         if diffs.size == 0:
@@ -678,15 +681,29 @@ def _summarize_timestamp_alignment(
     other: Optional[np.ndarray],
     max_delta: Optional[float],
     errors: List[str],
+    valid_mask: Optional[np.ndarray] = None,
 ) -> Optional[Dict[str, float]]:
     _ensure_validator_runtime()
     if other is None:
         return None
-    delta = np.asarray(other, dtype=np.float64) - np.asarray(base, dtype=np.float64)
+    base = np.asarray(base, dtype=np.float64)
+    other = np.asarray(other, dtype=np.float64)
+    if valid_mask is not None:
+        valid_mask = np.asarray(valid_mask, dtype=bool).reshape(-1)
+        if valid_mask.shape[0] != base.shape[0] or other.shape[0] != base.shape[0]:
+            errors.append(
+                f"Timestamp alignment mask for {other_key} must match {base_key} length."
+            )
+            valid_mask = None
+    if valid_mask is not None:
+        base = base[valid_mask]
+        other = other[valid_mask]
+    delta = other - base
     abs_delta = np.abs(delta)
     summary = {
         "max_abs_delta": float(abs_delta.max(initial=0.0)),
         "mean_abs_delta": float(abs_delta.mean()) if abs_delta.size > 0 else 0.0,
+        "checked_count": int(abs_delta.size),
     }
     if max_delta is not None and summary["max_abs_delta"] > float(max_delta):
         errors.append(
@@ -798,6 +815,10 @@ def _validate_timestamps(
             errors,
             require=require_timestamps,
             strictly_increasing=False,
+            check_monotonic=not (
+                key == _as_optional_key(gaze_timestamp_key)
+                and ("gaze_3d_source" in data or "has_gaze_label" in data)
+            ),
             episode_ends=episode_ends,
             scale_to_seconds=scale_to_seconds,
         )
@@ -812,9 +833,16 @@ def _validate_timestamps(
     alignment = {}
     intervals = {}
     for key, values in timestamp_values.items():
+        is_gaze_timestamp = key == _as_optional_key(gaze_timestamp_key)
+        is_nearest_source_timestamp = key in {
+            _as_optional_key(robot_state_timestamp_key),
+            _as_optional_key(action_timestamp_key),
+        }
         max_step = (
             gaze_timestamp_max_step
-            if key == _as_optional_key(gaze_timestamp_key)
+            if is_gaze_timestamp
+            else None
+            if is_nearest_source_timestamp
             else timestamp_max_step
         )
         intervals[key] = _summarize_timestamp_intervals(
@@ -825,9 +853,21 @@ def _validate_timestamps(
             episode_ends=episode_ends,
         )
     if base is not None:
+        gaze_alignment_mask = None
+        if gaze_timestamp_key is not None and gaze_timestamp_key in timestamp_values:
+            # Interpolated gaze is a label synthesized for the current aligned
+            # row. Its raw Quest receive time is intentionally allowed to be
+            # stale; validate freshness only for median-filtered source rows.
+            if "gaze_3d_source" in data:
+                gaze_source = np.asarray(data["gaze_3d_source"][:]).reshape(-1)
+                if gaze_source.shape[0] == n_steps:
+                    gaze_alignment_mask = gaze_source == 1
+            elif "has_gaze_label" in data:
+                gaze_alignment_mask = np.asarray(data["has_gaze_label"][:]).reshape(-1).astype(bool)
         for key, values in timestamp_values.items():
             if key == timestamp_key:
                 continue
+            alignment_mask = gaze_alignment_mask if key == gaze_timestamp_key else None
             summary = _summarize_timestamp_alignment(
                 base_key=timestamp_key,
                 base=base,
@@ -835,6 +875,7 @@ def _validate_timestamps(
                 other=values,
                 max_delta=timestamp_max_delta,
                 errors=errors,
+                valid_mask=alignment_mask,
             )
             if summary is not None:
                 alignment[key] = summary
