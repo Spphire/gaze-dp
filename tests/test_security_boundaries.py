@@ -18,6 +18,14 @@ from diffusion_policy.model.common.normalizer import (
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
 
 
+class _CheckpointWorkspace(BaseWorkspace):
+    include_keys = ("value",)
+
+    def __init__(self, cfg, output_dir=None, value=0):
+        super().__init__(cfg=cfg, output_dir=output_dir)
+        self.value = value
+
+
 @pytest.mark.parametrize(
     ("expression", "expected"),
     [
@@ -118,3 +126,53 @@ def test_normalizer_state_roundtrip_uses_weights_only_loading(tmp_path):
 
     value = torch.tensor([[0.5]], dtype=torch.float32)
     assert torch.equal(restored.normalize({"action": value})["action"], value)
+
+
+def test_workspace_keeps_only_the_requested_rolling_checkpoints(tmp_path):
+    workspace = _CheckpointWorkspace(
+        cfg=OmegaConf.create({"test": True}), output_dir=str(tmp_path)
+    )
+
+    for index in range(1, 8):
+        workspace.value = index
+        workspace.save_checkpoint(
+            use_thread=False,
+            retain_last_n=5,
+            retained_tag=f"rolling-epoch={index:04d}-step={index:06d}",
+        )
+
+    checkpoint_dir = tmp_path / "checkpoints"
+    rolling_names = sorted(path.name for path in checkpoint_dir.glob("rolling-*.ckpt"))
+    assert rolling_names == [
+        f"rolling-epoch={index:04d}-step={index:06d}.ckpt"
+        for index in range(3, 8)
+    ]
+    restored = _CheckpointWorkspace.create_from_checkpoint(
+        checkpoint_dir / "latest.ckpt", trust_checkpoint=True
+    )
+    assert restored.value == 7
+
+
+def test_workspace_failed_atomic_save_preserves_previous_latest(tmp_path, monkeypatch):
+    workspace = _CheckpointWorkspace(
+        cfg=OmegaConf.create({"test": True}), output_dir=str(tmp_path), value=1
+    )
+    workspace.save_checkpoint(use_thread=False)
+    latest_path = tmp_path / "checkpoints" / "latest.ckpt"
+    original_bytes = latest_path.read_bytes()
+
+    def fail_after_partial_write(_payload, file_obj, **_kwargs):
+        file_obj.write(b"incomplete")
+        raise OSError("simulated checkpoint write failure")
+
+    monkeypatch.setattr(torch, "save", fail_after_partial_write)
+    workspace.value = 2
+    with pytest.raises(OSError, match="simulated checkpoint write failure"):
+        workspace.save_checkpoint(use_thread=False)
+
+    assert latest_path.read_bytes() == original_bytes
+    restored = _CheckpointWorkspace.create_from_checkpoint(
+        latest_path, trust_checkpoint=True
+    )
+    assert restored.value == 1
+    assert not [path for path in latest_path.parent.iterdir() if path.suffix == ".tmp"]

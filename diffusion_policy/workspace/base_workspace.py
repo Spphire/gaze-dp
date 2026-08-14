@@ -1,6 +1,9 @@
 from typing import Optional
 import os
 import pathlib
+import shutil
+import tempfile
+import uuid
 import hydra
 import copy
 from hydra.core.hydra_config import HydraConfig
@@ -20,6 +23,7 @@ class BaseWorkspace:
         self.cfg = cfg
         self._output_dir = output_dir
         self._saving_thread = None
+        self._saving_error = None
 
     @property
     def output_dir(self):
@@ -37,7 +41,10 @@ class BaseWorkspace:
     def save_checkpoint(self, path=None, tag='latest', 
             exclude_keys=None,
             include_keys=None,
-            use_thread=True):
+            use_thread=True,
+            retain_last_n=0,
+            retained_tag=None):
+        self.wait_for_pending_checkpoint()
         if path is None:
             path = pathlib.Path(self.output_dir).joinpath('checkpoints', f'{tag}.ckpt')
         else:
@@ -47,7 +54,7 @@ class BaseWorkspace:
         if include_keys is None:
             include_keys = tuple(self.include_keys) + ('_output_dir',)
 
-        path.parent.mkdir(parents=False, exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             'cfg': self.cfg,
             'state_dicts': dict(),
@@ -64,13 +71,94 @@ class BaseWorkspace:
                         payload['state_dicts'][key] = value.state_dict()
             elif key in include_keys:
                 payload['pickles'][key] = dill.dumps(value)
+        save_kwargs = {
+            'retain_last_n': retain_last_n,
+            'retained_tag': retained_tag,
+        }
         if use_thread:
+            def save_in_thread():
+                try:
+                    self._save_checkpoint_atomically(payload, path, **save_kwargs)
+                except Exception as exc:
+                    self._saving_error = exc
+
             self._saving_thread = threading.Thread(
-                target=lambda : torch.save(payload, path.open('wb'), pickle_module=dill))
+                target=save_in_thread,
+                name="checkpoint-writer",
+            )
             self._saving_thread.start()
         else:
-            torch.save(payload, path.open('wb'), pickle_module=dill)
+            self._save_checkpoint_atomically(payload, path, **save_kwargs)
         return str(path.absolute())
+
+    def wait_for_pending_checkpoint(self):
+        """Finish the preceding checkpoint writer and surface any write failure."""
+        if self._saving_thread is not None:
+            self._saving_thread.join()
+            self._saving_thread = None
+        if self._saving_error is not None:
+            error = self._saving_error
+            self._saving_error = None
+            raise RuntimeError("Asynchronous checkpoint save failed.") from error
+
+    @staticmethod
+    def _save_checkpoint_atomically(
+            payload,
+            path,
+            retain_last_n=0,
+            retained_tag=None):
+        """Write a checkpoint beside its target, then atomically publish it."""
+        path = pathlib.Path(path)
+        temp_fd, temp_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        os.close(temp_fd)
+        temp_path = pathlib.Path(temp_name)
+        try:
+            with temp_path.open('wb') as file_obj:
+                torch.save(payload, file_obj, pickle_module=dill)
+                file_obj.flush()
+                os.fsync(file_obj.fileno())
+            os.replace(temp_path, path)
+            if retained_tag is not None:
+                BaseWorkspace._retain_checkpoint(
+                    path=path,
+                    retained_tag=retained_tag,
+                    retain_last_n=retain_last_n,
+                )
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
+
+    @staticmethod
+    def _retain_checkpoint(path, retained_tag, retain_last_n):
+        path = pathlib.Path(path)
+        retain_last_n = max(0, int(retain_last_n))
+        if retain_last_n == 0:
+            return
+        if not retained_tag.startswith('rolling-'):
+            raise ValueError("retained_tag must start with 'rolling-'.")
+
+        retained_path = path.parent.joinpath(f'{retained_tag}.ckpt')
+        temp_path = path.parent.joinpath(
+            f".{retained_path.name}.{uuid.uuid4().hex}.tmp"
+        )
+        try:
+            try:
+                os.link(path, temp_path)
+            except OSError:
+                shutil.copy2(path, temp_path)
+            os.replace(temp_path, retained_path)
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
+
+        rolling_paths = sorted(
+            path.parent.glob('rolling-*.ckpt'),
+            key=lambda candidate: (candidate.stat().st_mtime_ns, candidate.name),
+            reverse=True,
+        )
+        for stale_path in rolling_paths[retain_last_n:]:
+            stale_path.unlink()
     
     def get_checkpoint_path(self, tag='latest'):
         return pathlib.Path(self.output_dir).joinpath('checkpoints', f'{tag}.ckpt')

@@ -208,6 +208,7 @@ logging:
   group: null
 
 checkpoint:
+  keep_last_n: 5
   topk:
     # Robot validation is the gate for mixed training; open validation is diagnostic.
     monitor_key: val_robot_loss

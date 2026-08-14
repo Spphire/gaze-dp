@@ -3075,7 +3075,15 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                     model_ddp = self.model
                     self.model = accelerator.unwrap_model(self.model)
                     if cfg.checkpoint.save_last_ckpt:
-                        self.save_checkpoint()
+                        self.save_checkpoint(
+                            retain_last_n=int(
+                                cfg.checkpoint.get("keep_last_n", 0)
+                            ),
+                            retained_tag=(
+                                f"rolling-epoch={int(self.epoch):04d}"
+                                f"-step={int(self.global_step):06d}"
+                            ),
+                        )
                     if cfg.checkpoint.save_last_snapshot:
                         self.save_snapshot()
 
@@ -3089,6 +3097,9 @@ class TrainGazeWamWorkspace(BaseWorkspace):
 
                 if stop_after_epoch:
                     break
+
+        if accelerator.is_main_process:
+            self.wait_for_pending_checkpoint()
 
         transfer_export_path = str(
             training_config["transfer"]["export_path"] or ""
