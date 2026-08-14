@@ -7,6 +7,21 @@ from typing import Dict, List, Optional, Sequence
 
 SUPPORTED_IMAGE_RESIZE_MODES = ("stretch", "letterbox")
 ACTION_TARGET_START_OFFSET_STEPS = 1
+TIMESTAMP_UNIT_SCALES_TO_SECONDS = {
+    "s": 1.0,
+    "sec": 1.0,
+    "second": 1.0,
+    "seconds": 1.0,
+    "ms": 1e-3,
+    "millisecond": 1e-3,
+    "milliseconds": 1e-3,
+    "us": 1e-6,
+    "microsecond": 1e-6,
+    "microseconds": 1e-6,
+    "ns": 1e-9,
+    "nanosecond": 1e-9,
+    "nanoseconds": 1e-9,
+}
 
 
 def _ensure_validator_runtime():
@@ -573,6 +588,39 @@ def _as_optional_key(value: Optional[str]) -> Optional[str]:
     return as_optional_gaze_wam_key(value)
 
 
+def _timestamp_scale_to_seconds(metadata_attrs, errors: List[str]):
+    raw_unit = metadata_attrs.get("timestamp_unit")
+    if raw_unit is None:
+        return None, 1.0
+    normalized_unit = str(raw_unit).strip().lower().replace("μ", "u").replace("µ", "u")
+    scale = TIMESTAMP_UNIT_SCALES_TO_SECONDS.get(normalized_unit)
+    if scale is None:
+        errors.append(
+            "Zarr metadata timestamp_unit must be a supported seconds-based unit, "
+            f"got {raw_unit!r}."
+        )
+        return normalized_unit, 1.0
+    return normalized_unit, float(scale)
+
+
+def _metadata_timestamp_key(
+    metadata_attrs,
+    explicit_key: Optional[str],
+    stream_name: Optional[str] = None,
+) -> Optional[str]:
+    if _as_optional_key(explicit_key) is not None:
+        return explicit_key
+    if stream_name is None:
+        return _as_optional_key(metadata_attrs.get("timestamp_key"))
+    stream_keys = metadata_attrs.get("timestamp_stream_keys")
+    if not isinstance(stream_keys, dict):
+        return None
+    stream_config = stream_keys.get(stream_name)
+    if isinstance(stream_config, dict):
+        return _as_optional_key(stream_config.get("output_key"))
+    return _as_optional_key(stream_config)
+
+
 def _validate_timestamp_array(
     data,
     key: Optional[str],
@@ -581,6 +629,7 @@ def _validate_timestamp_array(
     require: bool = False,
     strictly_increasing: bool = False,
     episode_ends: Optional[np.ndarray] = None,
+    scale_to_seconds: float = 1.0,
 ):
     _ensure_validator_runtime()
     key = _as_optional_key(key)
@@ -600,7 +649,7 @@ def _validate_timestamp_array(
     if values.shape[1] != 1:
         errors.append(f"{key} must be [N] or [N,1], got {timestamp.shape}.")
         return None
-    values = values[:, 0]
+    values = values[:, 0] * float(scale_to_seconds)
     if not np.all(np.isfinite(values)):
         errors.append(f"{key} must contain only finite timestamps.")
         return values
@@ -702,6 +751,8 @@ def _validate_timestamps(
     timestamp_max_step: Optional[float],
     gaze_timestamp_max_step: Optional[float],
     episode_ends: Optional[np.ndarray] = None,
+    timestamp_unit: Optional[str] = None,
+    scale_to_seconds: float = 1.0,
 ) -> Dict[str, object]:
     requested = [
         timestamp_key,
@@ -730,6 +781,7 @@ def _validate_timestamps(
         require=require_timestamps,
         strictly_increasing=False,
         episode_ends=episode_ends,
+        scale_to_seconds=scale_to_seconds,
     )
     timestamp_values = {}
     if base is not None:
@@ -747,6 +799,7 @@ def _validate_timestamps(
             require=require_timestamps,
             strictly_increasing=False,
             episode_ends=episode_ends,
+            scale_to_seconds=scale_to_seconds,
         )
         if values is not None:
             timestamp_values[key] = values
@@ -790,6 +843,8 @@ def _validate_timestamps(
         "checked": bool(timestamp_values),
         "keys": sorted(timestamp_values.keys()),
         "base_key": timestamp_key if base is not None else None,
+        "timestamp_unit": timestamp_unit,
+        "scale_to_seconds": float(scale_to_seconds),
         "intervals": intervals,
         "alignment": alignment,
     }
@@ -950,6 +1005,31 @@ def validate_gaze_wam_zarr(
                 f"{list(metadata_image_size)!r} does not match validation "
                 f"image_size={list(image_size)!r}."
             )
+        timestamp_key = _metadata_timestamp_key(metadata_attrs, timestamp_key)
+        image_timestamp_key = _metadata_timestamp_key(
+            metadata_attrs,
+            image_timestamp_key,
+            "image_timestamp",
+        )
+        robot_state_timestamp_key = _metadata_timestamp_key(
+            metadata_attrs,
+            robot_state_timestamp_key,
+            "robot_state_timestamp",
+        )
+        action_timestamp_key = _metadata_timestamp_key(
+            metadata_attrs,
+            action_timestamp_key,
+            "action_timestamp",
+        )
+        gaze_timestamp_key = _metadata_timestamp_key(
+            metadata_attrs,
+            gaze_timestamp_key,
+            "gaze_timestamp",
+        )
+        timestamp_unit, timestamp_scale_to_seconds = _timestamp_scale_to_seconds(
+            metadata_attrs,
+            errors,
+        )
         data, episode_ends = _resolve_groups(root)
         n_steps, image = _validate_image(data, camera_key, errors)
         _validate_episode_ends(episode_ends, n_steps, errors)
@@ -991,6 +1071,8 @@ def validate_gaze_wam_zarr(
             timestamp_max_step=timestamp_max_step,
             gaze_timestamp_max_step=gaze_timestamp_max_step,
             episode_ends=episode_ends,
+            timestamp_unit=timestamp_unit,
+            scale_to_seconds=timestamp_scale_to_seconds,
         )
 
         if dataset_type == "robot":

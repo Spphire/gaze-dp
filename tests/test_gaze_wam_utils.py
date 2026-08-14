@@ -9216,6 +9216,49 @@ def test_validate_gaze_wam_zarr_timestamp_alignment():
         assert any("timestamp" in message for message in missing["errors"])
 
 
+def test_validate_gaze_wam_zarr_infers_nanosecond_timestamp_metadata():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        open_path = _write_gaze_wam_zarr(
+            Path(tmpdir) / "open.zarr",
+            include_action=False,
+        )
+        root = zarr.open(str(open_path), mode="a")
+        root["meta"].attrs.update(
+            {
+                "dataset_type": "open",
+                "image_resize_mode": "stretch",
+                "image_size": [16, 16],
+                "timestamp_key": "timestamp_ns",
+                "timestamp_unit": "ns",
+            }
+        )
+        timestamp_ns = np.arange(6, dtype=np.int64) * 50_000_000
+        root["data"].array(
+            "timestamp_ns",
+            timestamp_ns,
+            shape=timestamp_ns.shape,
+            dtype=timestamp_ns.dtype,
+        )
+
+        summary = validate_gaze_wam_zarr(
+            dataset_path=str(open_path),
+            dataset_type="open",
+            n_obs_steps=2,
+            action_horizon=3,
+            image_size=(16, 16),
+            image_resize_mode="stretch",
+            heatmap_token_grid=(4, 4),
+            require_timestamps=True,
+            timestamp_max_step=0.06,
+        )
+
+        assert summary["valid"] is True
+        assert summary["timestamps"]["base_key"] == "timestamp_ns"
+        assert summary["timestamps"]["timestamp_unit"] == "ns"
+        assert summary["timestamps"]["scale_to_seconds"] == 1e-9
+        assert summary["timestamps"]["intervals"]["timestamp_ns"]["max_step"] <= 0.051
+
+
 def test_validate_gaze_wam_zarr_timestamp_steps_ignore_episode_boundaries():
     with tempfile.TemporaryDirectory() as tmpdir:
         robot_path = _write_linear_action_zarr(Path(tmpdir) / "robot.zarr", length=6)
