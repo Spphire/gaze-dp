@@ -10,7 +10,10 @@ robot_image_resize_mode: letterbox
 open_image_resize_mode: stretch
 # Canonical robot rows come from the Collector's aligned 30 Hz fusion timeline.
 robot_sample_fps: 30.0
-robot_dataset_path: data/gaze_wam_robot_20260813_after_162120.zarr
+# 61 retained whole recordings from the immutable cumulative batch beginning
+# at record_20260813_162120. The Collector-to-Zarr workflow validates this
+# letterboxed dataset before it is transferred to the training host.
+robot_dataset_path: data/gaze_wam_robot_20260814_from_162120.zarr
 open_dataset_path: data/hot3d_open_train.zarr
 
 n_obs_steps: 2
