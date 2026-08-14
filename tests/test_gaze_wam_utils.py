@@ -8752,22 +8752,19 @@ def test_validate_gaze_wam_zarr_robot_open_and_missing_key():
         assert missing_label_summary["valid"] is False
         assert any("Robot zarr must contain" in message for message in missing_label_summary["errors"])
 
-        try:
-            validate_gaze_wam_zarr(
-                dataset_path=str(robot_path),
-                dataset_type="robot",
-                n_obs_steps=2,
-                action_horizon=3,
-                image_size=(16, 16),
-                image_resize_mode="letterbox",
-                heatmap_token_grid=(4, 4),
-                check_dataset_sample=False,
-            )
-        except ValueError as exc:
-            assert "stretch resize" in str(exc)
-            assert "letterbox" in str(exc)
-        else:
-            raise AssertionError("Expected unsupported image_resize_mode to fail.")
+        zarr.open(str(robot_path), mode="a")["meta"].attrs["image_resize_mode"] = "letterbox"
+        letterbox_summary = validate_gaze_wam_zarr(
+            dataset_path=str(robot_path),
+            dataset_type="robot",
+            n_obs_steps=2,
+            action_horizon=3,
+            image_size=(16, 16),
+            image_resize_mode="letterbox",
+            heatmap_token_grid=(4, 4),
+            check_dataset_sample=False,
+        )
+        assert letterbox_summary["valid"] is True
+        assert letterbox_summary["image_resize_mode"] == "letterbox"
 
 
 def test_validate_gaze_wam_zarr_checks_optional_presence_masks():
@@ -10216,22 +10213,20 @@ def test_gaze_wam_dataset_resizes_images_and_normalizes_pixel_gaze_from_source_s
             torch.tensor([0.5, 0.5], dtype=torch.float32),
         )
 
-        try:
-            GazeWamRobotDataset(
-                dataset_path=str(robot_path),
-                n_obs_steps=2,
-                action_horizon=3,
-                image_size=(16, 16),
-                image_resize_mode="letterbox",
-                heatmap_token_grid=(4, 4),
-                gaze_is_normalized=False,
-                action_padding=True,
-            )
-        except ValueError as exc:
-            assert "stretch resize" in str(exc)
-            assert "letterbox" in str(exc)
-        else:
-            raise AssertionError("Expected unsupported image_resize_mode to fail.")
+        letterbox_dataset = GazeWamRobotDataset(
+            dataset_path=str(robot_path),
+            n_obs_steps=2,
+            action_horizon=3,
+            image_size=(16, 16),
+            image_resize_mode="letterbox",
+            heatmap_token_grid=(4, 4),
+            gaze_is_normalized=False,
+            action_padding=True,
+        )
+        assert torch.allclose(
+            letterbox_dataset[0]["gaze_xy"],
+            torch.tensor([0.5, 0.5], dtype=torch.float32),
+        )
 
 
 def test_gaze_wam_open_dataset_accepts_dense_heatmap_with_masked_point_gaze():

@@ -5,7 +5,7 @@ import json
 import pathlib
 from typing import Dict, List, Optional, Sequence
 
-SUPPORTED_IMAGE_RESIZE_MODES = ("stretch",)
+SUPPORTED_IMAGE_RESIZE_MODES = ("stretch", "letterbox")
 
 
 def _ensure_validator_runtime():
@@ -852,9 +852,9 @@ def validate_gaze_wam_zarr(
         raise ValueError("dataset_type must be 'robot' or 'open'.")
     if image_resize_mode not in SUPPORTED_IMAGE_RESIZE_MODES:
         raise ValueError(
-            "Gaze-WAM validation currently supports only direct stretch resize. "
-            f"Got image_resize_mode={image_resize_mode!r}; crop/letterbox modes must remap gaze "
-            "coordinates and dense heatmaps before validation."
+            "Gaze-WAM validation supports pre-aligned stretch or letterbox inputs. "
+            f"Got image_resize_mode={image_resize_mode!r}; other geometry modes must remap "
+            "gaze coordinates and dense heatmaps before validation."
         )
 
     errors: List[str] = []
@@ -1194,7 +1194,7 @@ def parse_args(argv: Optional[Sequence[str]] = None):
         "--image-resize-mode",
         choices=SUPPORTED_IMAGE_RESIZE_MODES,
         default="stretch",
-        help="Image/gaze geometric contract. Only direct stretch resize is currently supported.",
+        help="Pre-aligned image/gaze geometric contract: stretch or letterbox.",
     )
     parser.add_argument("--heatmap-token-grid", type=int, nargs=2, default=(16, 16), metavar=("H", "W"))
     parser.add_argument(

@@ -28,7 +28,7 @@ from diffusion_policy.dataset.base_dataset import BaseDataset
 from diffusion_policy.model.common.normalizer import LinearNormalizer
 from diffusion_policy.model.gaze_wam.heatmap_codec import HeatmapTokenCodec
 
-SUPPORTED_IMAGE_RESIZE_MODES = ("stretch",)
+SUPPORTED_IMAGE_RESIZE_MODES = ("stretch", "letterbox")
 
 
 def _validate_positive_int(name: str, value: int) -> int:
@@ -354,9 +354,9 @@ def _normalize_gaze_xy(
 def _validate_image_resize_mode(image_resize_mode: str) -> str:
     if image_resize_mode not in SUPPORTED_IMAGE_RESIZE_MODES:
         raise ValueError(
-            "Gaze-WAM point-gaze labels currently support only direct stretch resize. "
-            f"Got image_resize_mode={image_resize_mode!r}; crop/letterbox modes must remap gaze_xy "
-            "and dense heatmaps before entering this dataset."
+            "Gaze-WAM point-gaze labels support pre-aligned stretch or letterbox inputs. "
+            f"Got image_resize_mode={image_resize_mode!r}; other geometry modes must remap "
+            "gaze_xy and dense heatmaps before entering this dataset."
         )
     return image_resize_mode
 
