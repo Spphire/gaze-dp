@@ -8417,6 +8417,34 @@ def test_gaze_wam_action_normalizer_uses_robot_relative_actions_only():
             raise AssertionError("Expected open-source dummy action normalizer fitting to fail.")
 
 
+def test_gaze_wam_robot_get_all_actions_skips_observation_loading():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        robot_path = _write_gaze_wam_zarr(Path(tmpdir) / "robot.zarr", include_action=True)
+        robot_dataset = GazeWamRobotDataset(
+            dataset_path=str(robot_path),
+            n_obs_steps=2,
+            action_horizon=3,
+            n_latency_steps=1,
+            action_downsample_steps=2,
+            image_size=(16, 16),
+            heatmap_token_grid=(4, 4),
+            action_padding=True,
+        )
+        expected = torch.stack(
+            [robot_dataset[idx]["action"] for idx in range(len(robot_dataset))],
+            dim=0,
+        )
+
+        def fail_if_observations_are_loaded(_idx):
+            raise AssertionError("get_all_actions must not decode observations")
+
+        robot_dataset._sample_obs_and_gaze = fail_if_observations_are_loaded
+        actual = robot_dataset.get_all_actions()
+
+        assert actual.shape == expected.shape
+        assert torch.allclose(actual, expected, atol=1e-6)
+
+
 def test_gaze_wam_robot_action_normalizer_rejects_empty_train_samples():
     with tempfile.TemporaryDirectory() as tmpdir:
         robot_path = _write_gaze_wam_zarr(Path(tmpdir) / "robot.zarr", include_action=True)

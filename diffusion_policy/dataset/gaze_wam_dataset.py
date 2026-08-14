@@ -837,10 +837,49 @@ class GazeWamRobotDataset(_BaseGazeWamZarrDataset):
                 "Gaze-WAM action normalizer. Check episode length, val_ratio, "
                 "action_horizon, n_latency_steps, downsampling, and action_padding."
             )
-        actions = []
-        for idx in range(len(self)):
-            actions.append(self[idx]["action"].numpy())
-        return torch.from_numpy(np.stack(actions, axis=0))
+
+        action_source = np.asarray(self.data_group[self.action_abs_key][:], dtype=np.float32)
+        tcp_pose_source = np.asarray(self.data_group[self.tcp_pose_key][:], dtype=np.float32)
+        gripper_source = np.asarray(self.data_group[self.gripper_key][:], dtype=np.float32)
+        current_indices = self.indices[:, 0]
+        episode_ends = self.indices[:, 2]
+        sampled_horizon = self.action_horizon + self.n_latency_steps
+        future_offsets = (
+            ACTION_TARGET_START_OFFSET_STEPS
+            + np.arange(sampled_horizon, dtype=np.int64) * self.action_downsample_steps
+        )
+
+        actions = np.empty((len(self), self.action_horizon, 10), dtype=np.float32)
+        batch_size = 4096
+        for batch_start in range(0, len(self), batch_size):
+            batch_end = min(batch_start + batch_size, len(self))
+            batch_current = current_indices[batch_start:batch_end]
+            batch_episode_ends = episode_ends[batch_start:batch_end]
+            target_indices = np.minimum(
+                batch_current[:, None] + future_offsets[None, :],
+                batch_episode_ends[:, None] - 1,
+            )
+
+            action_abs = _compose_action_with_gripper(
+                action_source[target_indices],
+                gripper_source[target_indices],
+                self.action_abs_key,
+            )
+            if self.n_latency_steps > 0:
+                action_abs = action_abs[:, self.n_latency_steps :]
+            action_base_abs = _compose_action_with_gripper(
+                tcp_pose_source[batch_current],
+                gripper_source[batch_current],
+                self.tcp_pose_key,
+            )
+            relative_actions = absolute_actions_to_relative_actions(
+                action_abs,
+                action_base_abs,
+            ).astype(np.float32)
+            _require_finite_array("robot normalizer relative actions", relative_actions)
+            actions[batch_start:batch_end] = relative_actions
+
+        return torch.from_numpy(actions)
 
     def _get_action_normalizer(self):
         return _make_action_normalizer(self.get_all_actions().numpy())
