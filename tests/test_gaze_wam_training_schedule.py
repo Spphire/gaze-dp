@@ -24,6 +24,7 @@ from diffusion_policy.scripts.plan_gaze_wam_experiments import (
     _sweep_variants,
 )
 from diffusion_policy.workspace.train_gaze_wam_workspace import (
+    _gaze_wam_checkpoint_due,
     _validate_gaze_wam_accumulation_flush_contract,
 )
 
@@ -251,6 +252,13 @@ def test_accumulation_contract_requires_epoch_boundary_flush():
     )
     with pytest.raises(RuntimeError, match="sync_with_dataloader=true"):
         _validate_gaze_wam_accumulation_flush_contract(disabled)
+
+
+def test_checkpoint_schedule_uses_completed_epoch_count():
+    assert _gaze_wam_checkpoint_due(1, checkpoint_every=2, stop_after_epoch=False) is False
+    assert _gaze_wam_checkpoint_due(2, checkpoint_every=2, stop_after_epoch=False) is True
+    assert _gaze_wam_checkpoint_due(600, checkpoint_every=2, stop_after_epoch=False) is True
+    assert _gaze_wam_checkpoint_due(599, checkpoint_every=2, stop_after_epoch=True) is True
 
 
 def test_accelerate_flushes_partial_accumulation_at_epoch_end():

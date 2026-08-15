@@ -162,12 +162,12 @@ def _validate_gaze_wam_accumulation_flush_contract(accelerator) -> bool:
 
 
 def _gaze_wam_checkpoint_due(
-    epoch: int,
+    completed_epochs: int,
     checkpoint_every: int,
     stop_after_epoch: bool,
 ) -> bool:
     """Always retain the terminal epoch when a global step budget stops a run."""
-    return bool(stop_after_epoch) or int(epoch) % int(checkpoint_every) == 0
+    return bool(stop_after_epoch) or int(completed_epochs) % int(checkpoint_every) == 0
 
 
 def _new_train_window_log_accumulator():
@@ -3053,7 +3053,7 @@ class TrainGazeWamWorkspace(BaseWorkspace):
 
                 should_save_checkpoint = (
                     _gaze_wam_checkpoint_due(
-                        epoch=self.epoch,
+                        completed_epochs=self.epoch + 1,
                         checkpoint_every=cfg.training.checkpoint_every,
                         stop_after_epoch=stop_after_epoch,
                     )
