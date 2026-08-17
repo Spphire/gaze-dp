@@ -10,7 +10,11 @@ from omegaconf import OmegaConf
 
 from diffusion_policy.common.pytorch_util import dict_apply
 from diffusion_policy.common.checkpoint_security import require_trusted_pickle_artifact
-from diffusion_policy.common.gaze_wam_image import image_to_chw_float
+from diffusion_policy.common.gaze_wam_image import (
+    image_to_chw_float,
+    remap_normalized_gaze_xy,
+    validate_image_resize_mode,
+)
 from diffusion_policy.common.omegaconf_resolvers import register_safe_omegaconf_resolvers
 from diffusion_policy.policy.gaze_wam_policy import GazeWamPolicy
 from diffusion_policy.real_world.gaze_wam_action_base import action_base_abs_to_10d
@@ -76,8 +80,28 @@ def _validate_camera_shape(camera_key: str, obs_meta: dict) -> Tuple[int, int]:
     return _validate_image_size(f"shape_meta.obs[{camera_key!r}].shape[-2:]", shape[-2:])
 
 
-def _image_to_chw_float(image: np.ndarray, image_size: Tuple[int, int]) -> np.ndarray:
-    return image_to_chw_float(image, image_size=image_size, name="image")
+def _infer_image_hw(image: np.ndarray) -> Tuple[int, int]:
+    array = np.asarray(image)
+    if array.ndim != 3:
+        raise ValueError(f"Expected image [H,W,C] or [C,H,W], got {array.shape}.")
+    if array.shape[-1] in (1, 3, 4):
+        return int(array.shape[0]), int(array.shape[1])
+    if array.shape[0] in (1, 3, 4):
+        return int(array.shape[1]), int(array.shape[2])
+    raise ValueError(f"Cannot infer image height/width for image shape {array.shape}.")
+
+
+def _image_to_chw_float(
+    image: np.ndarray,
+    image_size: Tuple[int, int],
+    image_resize_mode: str,
+) -> np.ndarray:
+    return image_to_chw_float(
+        image,
+        image_size=image_size,
+        image_resize_mode=image_resize_mode,
+        name="image",
+    )
 
 
 def tcp_pose_to_action_base_abs(
@@ -133,6 +157,18 @@ def load_gaze_wam_policy_from_checkpoint(
     return policy, cfg
 
 
+def _checkpoint_image_resize_mode(cfg: object) -> str:
+    """Resolve the robot-camera geometry stored in a Gaze-WAM checkpoint."""
+    for path in ("task.robot_image_resize_mode", "task.image_resize_mode"):
+        try:
+            value = OmegaConf.select(cfg, path, default=None)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            value = None
+        if value is not None and str(value).strip():
+            return validate_image_resize_mode(str(value))
+    return "stretch"
+
+
 class GazeWamInferenceAdapter:
     """Deployment-facing adapter for action-only Gaze-WAM inference.
 
@@ -146,6 +182,7 @@ class GazeWamInferenceAdapter:
         shape_meta: dict,
         camera_key: str = "camera0_rgb",
         image_size: Optional[Sequence[int]] = None,
+        image_resize_mode: str = "stretch",
         n_obs_steps: Optional[int] = None,
         obs_downsample_steps: int = 1,
         device: Optional[str] = None,
@@ -166,6 +203,7 @@ class GazeWamInferenceAdapter:
         if image_size is None:
             image_size = shape_image_size
         self.image_size = _validate_image_size("image_size", image_size)
+        self.image_resize_mode = validate_image_resize_mode(image_resize_mode)
         if n_obs_steps is None:
             n_obs_steps = int(obs_meta.get("horizon", 1))
         self.n_obs_steps = _validate_positive_int("n_obs_steps", n_obs_steps)
@@ -176,6 +214,7 @@ class GazeWamInferenceAdapter:
         self.cfg_scale = self.policy._validate_nonnegative_float("cfg_scale", cfg_scale)
         self.device = torch.device(device) if device is not None else policy.device
         self.image_history = collections.deque(maxlen=self.n_obs_steps)
+        self._gaze_source_image_size: Optional[Tuple[int, int]] = None
         self.policy.eval().to(self.device)
 
     @classmethod
@@ -187,6 +226,7 @@ class GazeWamInferenceAdapter:
         num_inference_steps: Optional[int] = None,
         camera_key: str = "camera0_rgb",
         cfg_scale: float = 1.0,
+        image_resize_mode: Optional[str] = None,
         trust_checkpoint: bool = False,
     ) -> "GazeWamInferenceAdapter":
         policy, cfg = load_gaze_wam_policy_from_checkpoint(
@@ -196,10 +236,21 @@ class GazeWamInferenceAdapter:
             num_inference_steps=num_inference_steps,
             trust_checkpoint=trust_checkpoint,
         )
+        checkpoint_resize_mode = _checkpoint_image_resize_mode(cfg)
+        if image_resize_mode is None:
+            image_resize_mode = checkpoint_resize_mode
+        else:
+            image_resize_mode = validate_image_resize_mode(image_resize_mode)
+            if image_resize_mode != checkpoint_resize_mode:
+                raise ValueError(
+                    "Gaze-DP image resize mismatch: checkpoint robot data uses "
+                    f"{checkpoint_resize_mode!r}, runtime requested {image_resize_mode!r}."
+                )
         return cls(
             policy=policy,
             shape_meta=cfg.task.shape_meta,
             camera_key=camera_key,
+            image_resize_mode=image_resize_mode,
             obs_downsample_steps=OmegaConf.select(
                 cfg,
                 "task.obs_downsample_steps",
@@ -211,23 +262,41 @@ class GazeWamInferenceAdapter:
 
     def reset(self) -> None:
         self.image_history.clear()
+        self._gaze_source_image_size = None
         if hasattr(self.policy, "reset"):
             self.policy.reset()
 
     def push_image(self, image: np.ndarray) -> None:
-        self.image_history.append(_image_to_chw_float(image, image_size=self.image_size))
+        source_image_size = _infer_image_hw(image)
+        self.image_history.append(
+            _image_to_chw_float(
+                image,
+                image_size=self.image_size,
+                image_resize_mode=self.image_resize_mode,
+            )
+        )
+        self._gaze_source_image_size = source_image_size
 
     def set_image_history(self, images: Sequence[np.ndarray]) -> None:
         """Replace history with timestamp-selected frames from the runtime."""
         images = list(images)
         if not images:
             raise ValueError("image_history must contain at least one image.")
-        processed = [
-            _image_to_chw_float(image, image_size=self.image_size)
-            for image in images[-self.n_obs_steps :]
-        ]
+        selected_images = images[-self.n_obs_steps :]
+        processed = []
+        source_sizes = []
+        for image in selected_images:
+            source_sizes.append(_infer_image_hw(image))
+            processed.append(
+                _image_to_chw_float(
+                    image,
+                    image_size=self.image_size,
+                    image_resize_mode=self.image_resize_mode,
+                )
+            )
         self.image_history.clear()
         self.image_history.extend(processed)
+        self._gaze_source_image_size = source_sizes[-1]
 
     def _stack_history(self) -> np.ndarray:
         if not self.image_history:
@@ -255,6 +324,13 @@ class GazeWamInferenceAdapter:
         else:
             gaze = np.asarray(gaze_xy, dtype=np.float32).reshape(1, 2)
             _require_finite_array("gaze_xy", gaze)
+            source_image_size = self._gaze_source_image_size or self.image_size
+            gaze = remap_normalized_gaze_xy(
+                gaze[0],
+                source_image_size=source_image_size,
+                target_image_size=self.image_size,
+                image_resize_mode=self.image_resize_mode,
+            ).reshape(1, 2)
             gaze = np.clip(gaze, 0.0, 1.0)
             has_gaze_label = np.asarray([True], dtype=bool)
             if use_gaze_condition is None:
