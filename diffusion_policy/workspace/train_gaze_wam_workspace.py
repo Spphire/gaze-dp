@@ -15,6 +15,7 @@ import os
 import pathlib
 import pickle
 import random
+import shutil
 
 import cv2
 import hydra
@@ -24,7 +25,7 @@ import torch.distributed as dist
 import tqdm
 import zarr
 from accelerate import Accelerator
-from accelerate.utils import DistributedDataParallelKwargs
+from accelerate.utils import DistributedDataParallelKwargs, DistributedType
 from omegaconf import OmegaConf, open_dict
 
 from diffusion_policy.common.checkpoint_util import TopKCheckpointManager
@@ -109,6 +110,32 @@ def _ensure_optimizer_initial_lr_for_resume(optimizer, base_lr, obs_encoder_lr):
             group["initial_lr"] = obs_encoder_lr
         else:
             group["initial_lr"] = base_lr
+
+
+def _deepspeed_state_checkpoint_path(output_dir, global_step):
+    return pathlib.Path(output_dir).joinpath(
+        "checkpoints",
+        f"accelerate_state_step_{int(global_step):06d}",
+    )
+
+
+def _workspace_checkpoint_exclude_keys(workspace, is_deepspeed):
+    exclude_keys = list(workspace.exclude_keys)
+    if is_deepspeed and "optimizer" not in exclude_keys:
+        exclude_keys.append("optimizer")
+    return tuple(exclude_keys)
+
+
+def _retain_deepspeed_state_checkpoints(checkpoint_dir, keep_last_n):
+    checkpoint_dir = pathlib.Path(checkpoint_dir)
+    keep_last_n = max(1, int(keep_last_n))
+    paths = sorted(
+        checkpoint_dir.glob("accelerate_state_step_*"),
+        key=lambda path: path.name,
+        reverse=True,
+    )
+    for stale_path in paths[keep_last_n:]:
+        shutil.rmtree(stale_path)
 
 
 def _planned_prepared_epoch_batches(dataloader, accelerator) -> int:
@@ -2133,6 +2160,7 @@ class TrainGazeWamWorkspace(BaseWorkspace):
         _validate_gaze_wam_accumulation_flush_contract(accelerator)
         require_amp = bool(cfg.training.get("require_amp", True))
         mixed_precision = str(getattr(accelerator, "mixed_precision", "no") or "no")
+        is_deepspeed = accelerator.distributed_type == DistributedType.DEEPSPEED
         if require_amp and mixed_precision not in ("bf16", "fp16"):
             raise RuntimeError(
                 "Gaze-WAM training requires AMP. Launch with "
@@ -2152,7 +2180,14 @@ class TrainGazeWamWorkspace(BaseWorkspace):
             latest_ckpt_path = self.get_checkpoint_path()
             if latest_ckpt_path.is_file():
                 print(f"Resuming from checkpoint {latest_ckpt_path}")
-                self.load_checkpoint(path=latest_ckpt_path, trust_checkpoint=True)
+                self.load_checkpoint(
+                    path=latest_ckpt_path,
+                    exclude_keys=_workspace_checkpoint_exclude_keys(
+                        self,
+                        is_deepspeed=is_deepspeed,
+                    ),
+                    trust_checkpoint=True,
+                )
                 resume_epoch = cfg.training.get("resume_epoch", None)
                 if resume_epoch is not None:
                     self.epoch = int(resume_epoch)
@@ -2423,6 +2458,23 @@ class TrainGazeWamWorkspace(BaseWorkspace):
         self.model = prepared["model"]
         self.optimizer = prepared["optimizer"]
         lr_scheduler = prepared["lr_scheduler"]
+        if is_deepspeed and cfg.training.resume and self.global_step > 0:
+            deepspeed_resume_path = _deepspeed_state_checkpoint_path(
+                self.output_dir,
+                self.global_step,
+            )
+            if deepspeed_resume_path.is_dir():
+                accelerator.load_state(str(deepspeed_resume_path))
+                print(
+                    "Restored DeepSpeed model, optimizer, scheduler, and RNG state "
+                    f"from {deepspeed_resume_path}"
+                )
+            elif accelerator.is_main_process:
+                print(
+                    "No matching DeepSpeed-native state was found for "
+                    f"global_step={self.global_step}; restored model/global step from "
+                    "the workspace checkpoint and initialized fresh optimizer state."
+                )
         train_epoch_dataloader = robot_dataloader if use_robot_data else open_dataloader
         if train_epoch_dataloader is None:
             raise ValueError(
@@ -3065,14 +3117,12 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                         ]
                     self.model.train()
 
-                should_save_checkpoint = (
-                    _gaze_wam_checkpoint_due(
-                        completed_epochs=self.epoch + 1,
-                        checkpoint_every=cfg.training.checkpoint_every,
-                        stop_after_epoch=stop_after_epoch,
-                    )
-                    and accelerator.is_main_process
+                checkpoint_due = _gaze_wam_checkpoint_due(
+                    completed_epochs=self.epoch + 1,
+                    checkpoint_every=cfg.training.checkpoint_every,
+                    stop_after_epoch=stop_after_epoch,
                 )
+                should_save_checkpoint = checkpoint_due and accelerator.is_main_process
                 metric_dict = {}
                 if step_log:
                     if training_contract_log_pending:
@@ -3085,11 +3135,30 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                         self.global_step += 1
                 self.epoch += 1
 
+                if checkpoint_due and is_deepspeed:
+                    deepspeed_state_path = _deepspeed_state_checkpoint_path(
+                        self.output_dir,
+                        self.global_step,
+                    )
+                    accelerator.wait_for_everyone()
+                    accelerator.save_state(str(deepspeed_state_path))
+                    accelerator.wait_for_everyone()
+                    if accelerator.is_main_process:
+                        _retain_deepspeed_state_checkpoints(
+                            pathlib.Path(self.output_dir) / "checkpoints",
+                            keep_last_n=cfg.checkpoint.get("keep_last_n", 0),
+                        )
+                    accelerator.wait_for_everyone()
+
                 if should_save_checkpoint:
                     model_ddp = self.model
                     self.model = accelerator.unwrap_model(self.model)
                     if cfg.checkpoint.save_last_ckpt:
                         self.save_checkpoint(
+                            exclude_keys=_workspace_checkpoint_exclude_keys(
+                                self,
+                                is_deepspeed=is_deepspeed,
+                            ),
                             retain_last_n=int(
                                 cfg.checkpoint.get("keep_last_n", 0)
                             ),
@@ -3106,7 +3175,13 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                     if monitor_key in metric_dict:
                         topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
                     if topk_ckpt_path is not None:
-                        self.save_checkpoint(path=topk_ckpt_path)
+                        self.save_checkpoint(
+                            path=topk_ckpt_path,
+                            exclude_keys=_workspace_checkpoint_exclude_keys(
+                                self,
+                                is_deepspeed=is_deepspeed,
+                            ),
+                        )
                     self.model = model_ddp
 
                 if stop_after_epoch:
