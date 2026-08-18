@@ -2499,11 +2499,12 @@ class TrainGazeWamWorkspace(BaseWorkspace):
 
                         optimizer_step_completed = False
                         with accelerator.accumulate(self.model):
-                            components = self.model(
-                                batch,
-                                return_per_sample=True,
-                            )
-                            raw_loss = components["loss"]
+                            with accelerator.autocast():
+                                components = self.model(
+                                    batch,
+                                    return_per_sample=True,
+                                )
+                                raw_loss = components["loss"]
                             accelerator.backward(raw_loss)
 
                             if accelerator.sync_gradients:
@@ -2709,10 +2710,11 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                                     ),
                                     shuffle=False,
                                 )
-                                components = self.model(
-                                    batch,
-                                    return_per_sample=True,
-                                )
+                                with accelerator.autocast():
+                                    components = self.model(
+                                        batch,
+                                        return_per_sample=True,
+                                    )
                                 (
                                     gather_action_loss,
                                     gather_heatmap_loss,
