@@ -15,5 +15,6 @@ same_network: true
 use_cpu: false
 deepspeed_config:
   deepspeed_config_file: accelerate/deepspeed_zero2_bf16.json
+  deepspeed_multinode_launcher: standard
   zero3_init_flag: false
   zero3_save_16bit_model: false

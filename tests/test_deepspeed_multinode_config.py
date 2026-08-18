@@ -26,6 +26,7 @@ def test_multinode_accelerate_config_has_fixed_world_size_and_rendezvous():
     assert "num_machines: 2" in text
     assert "num_processes: 16" in text
     assert "deepspeed_config_file: accelerate/deepspeed_zero2_bf16.json" in text
+    assert "deepspeed_multinode_launcher: standard" in text
 
 
 def test_multinode_launcher_requires_explicit_rank_and_uses_research_config():
@@ -37,4 +38,5 @@ def test_multinode_launcher_requires_explicit_rank_and_uses_research_config():
     assert "--machine_rank" in text
     assert "--main_process_ip" in text
     assert "accelerate/2node-16gpu-deepspeed-bf16.yaml" in text
+    assert '"$PYTHON_BIN" -m accelerate.commands.accelerate_cli' in text
     assert "training.max_train_steps=${MAX_TRAIN_STEPS}" in text

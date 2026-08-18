@@ -21,12 +21,12 @@ case "$MACHINE_RANK" in
   *) echo "MACHINE_RANK must be 0 or 1, got: $MACHINE_RANK" >&2; exit 2 ;;
 esac
 
-ACCELERATE_BIN="$ROOT/.venv/bin/accelerate"
-if [[ ! -x "$ACCELERATE_BIN" ]]; then
-  ACCELERATE_BIN="$(command -v accelerate || true)"
+PYTHON_BIN="${PYTHON_BIN:-$ROOT/.venv/bin/python}"
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  PYTHON_BIN="$(command -v python3 || command -v python || true)"
 fi
-if [[ -z "$ACCELERATE_BIN" || ! -x "$ACCELERATE_BIN" ]]; then
-  echo "Missing an accelerate launcher. Install the project environment first." >&2
+if [[ -z "$PYTHON_BIN" || ! -x "$PYTHON_BIN" ]]; then
+  echo "Missing a Python launcher. Install the research environment first." >&2
   exit 1
 fi
 
@@ -48,4 +48,4 @@ ARGS=(
 
 # Keep the smoke/benchmark independent of online model downloads and W&B.
 HF_HUB_OFFLINE=1 WANDB_MODE=offline HYDRA_FULL_ERROR=1 \
-  "$ACCELERATE_BIN" "${ARGS[@]}"
+  "$PYTHON_BIN" -m accelerate.commands.accelerate_cli "${ARGS[@]}"
