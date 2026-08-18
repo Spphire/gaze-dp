@@ -16,6 +16,7 @@ def test_gaze_wam_optimizer_omits_empty_parameter_groups_for_deepspeed():
         ]
     )
     policy.gaze_encoder = torch.nn.Linear(2, 2)
+    policy.gaze_encoder.requires_grad_(False)
     policy.heatmap_image_decoder = None
     policy.obs_encoder = torch.nn.Linear(2, 2)
 
@@ -30,3 +31,8 @@ def test_gaze_wam_optimizer_omits_empty_parameter_groups_for_deepspeed():
 
     assert optimizer.param_groups
     assert all(group["params"] for group in optimizer.param_groups)
+    assert all(
+        param.requires_grad
+        for group in optimizer.param_groups
+        for param in group["params"]
+    )

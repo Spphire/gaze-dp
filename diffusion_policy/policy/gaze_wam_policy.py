@@ -506,7 +506,9 @@ class GazeWamPolicy(BaseImagePolicy):
             if len(group.get("params", ())) > 0
         ]
 
-        gaze_params = list(self.gaze_encoder.parameters())
+        gaze_params = [
+            param for param in self.gaze_encoder.parameters() if param.requires_grad
+        ]
         if gaze_params:
             optim_groups.append(
                 {
@@ -532,6 +534,8 @@ class GazeWamPolicy(BaseImagePolicy):
         backbone_params = list()
         other_obs_params = list()
         for key, value in self.obs_encoder.named_parameters():
+            if not value.requires_grad:
+                continue
             if key.startswith("key_model_map"):
                 backbone_params.append(value)
             else:
