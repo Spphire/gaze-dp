@@ -2464,7 +2464,10 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                 self.global_step,
             )
             if deepspeed_resume_path.is_dir():
-                accelerator.load_state(str(deepspeed_resume_path))
+                accelerator.load_state(
+                    str(deepspeed_resume_path),
+                    load_module_strict=False,
+                )
                 print(
                     "Restored DeepSpeed model, optimizer, scheduler, and RNG state "
                     f"from {deepspeed_resume_path}"
@@ -3141,7 +3144,10 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                         self.global_step,
                     )
                     accelerator.wait_for_everyone()
-                    accelerator.save_state(str(deepspeed_state_path))
+                    accelerator.save_state(
+                        str(deepspeed_state_path),
+                        exclude_frozen_parameters=True,
+                    )
                     accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
                         _retain_deepspeed_state_checkpoints(
