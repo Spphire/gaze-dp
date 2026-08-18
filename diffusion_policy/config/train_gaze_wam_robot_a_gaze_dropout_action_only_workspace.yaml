@@ -1,0 +1,31 @@
+defaults:
+  - train_gaze_wam_robot_only_workspace
+  - _self_
+
+name: train_gaze_wam_robot_a_gaze_dropout_action_only
+exp_name: "robot_a_gaze_dropout_action_only"
+
+task:
+  robot_dataset_path: data/gaze_wam_robot_20260814_from_162120.zarr
+  n_obs_steps: 1
+  robot_gaze_dropout_prob: 0.2
+  robot_heatmap_on_gaze_dropout: false
+
+policy:
+  # Gaze is used when present, but neither gaze dropout nor retained gaze
+  # rows contribute heatmap supervision in this action-only ablation.
+  heatmap_loss_weight: 0.0
+  heatmap_token_kl_loss_weight: 0.0
+  heatmap_xy_loss_weight: 0.0
+  heatmap_point_nll_loss_weight: 0.0
+  heatmap_js_loss_weight: 0.0
+  heatmap_diffusion_final_loss_enabled: false
+  obs_encoder:
+    pretrained: false
+    checkpoint_path: data/checkpoints/dinov3/vit_base_patch16_dinov3.lvd1689m.safetensors
+
+training:
+  num_epochs: 600
+
+checkpoint:
+  keep_last_n: 5
