@@ -257,7 +257,37 @@ end to end. Median step time improves by `1.480x`; the larger end-to-end gain
 also reflects the second host sharing data decoding and input work. This is a
 real fixed-global-batch training acceleration, not a weak-scaling comparison.
 
-The production `gaze-wam-cleanup` branch remains unchanged. Before adopting
-this research launcher for long production jobs, run a checkpoint-enabled
-RoCE resume cycle and a multi-epoch stability test; the existing exact-resume
-test was performed on the socket fallback before the GID fix.
+### RoCE resume and epoch-boundary validation
+
+A checkpoint-enabled run on the corrected RoCE path wrote step 3, restored it,
+completed the next optimizer step, and wrote step 4:
+
+```text
+data/outputs/deepspeed_resume_roce_3c7922f_4102_4103
+step 3 -> restore -> step 4
+```
+
+Both native checkpoints contain all 16 ZeRO optimizer shards. The restore log
+confirms model, optimizer, scheduler, dataloader sampler, and RNG restoration.
+The resulting workspace checkpoint reports `global_step=4`, `epoch=2`, and
+contains both `model` and `ema_model` state dictionaries.
+
+Commit `8912c0de633606633d53777cf63dfc2912a20f45` then ran 160 optimizer
+steps with `NUM_EPOCHS=2`, crossing the 143-step epoch boundary under the
+launcher's default validated RoCE profile:
+
+```text
+data/outputs/benchmark_multi16_roce_2epoch_8912c0d_20260819/benchmark_summary.json
+```
+
+All 160 logged losses were finite and the run completed global steps 0 through
+159. Rebuilding the input iterator at the first step of epoch 1 took
+`9.144 s`; the following step returned to `0.222 s`, and training continued
+normally through step 159. This is a visible epoch-boundary input-pipeline
+cost, not an NCCL stall.
+
+The production `gaze-wam-cleanup` branch remains unchanged. The research
+branch now proves fixed-batch acceleration, native checkpoint continuity, and
+multi-epoch execution on the tested H200-4102/4103 RoCE topology. A production
+promotion should still be an explicit branch decision and should retain the
+transport preflight rather than relying on NCCL's automatic GID selection.
