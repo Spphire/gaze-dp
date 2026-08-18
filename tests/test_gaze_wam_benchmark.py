@@ -105,5 +105,7 @@ def test_distributed_benchmark_launcher_uses_equal_effective_batch_and_no_checkp
     assert "PER_PROCESS_BATCH_SIZE=$((EFFECTIVE_BATCH_SIZE / NUM_PROCESSES))" in text
     assert "training.measure_step_performance=true" in text
     assert "training.performance_warmup_steps=${WARMUP_STEPS}" in text
+    assert "training.val_every=0" in text
+    assert "training.max_val_steps=1" in text
     assert "checkpoint.save_deepspeed_state=false" in text
     assert "checkpoint.save_last_ckpt=false" in text
