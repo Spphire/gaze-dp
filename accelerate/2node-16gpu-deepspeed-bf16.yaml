@@ -14,7 +14,11 @@ rdzv_backend: static
 same_network: true
 use_cpu: false
 deepspeed_config:
-  deepspeed_config_file: accelerate/deepspeed_zero2_bf16.json
   deepspeed_multinode_launcher: standard
+  zero_stage: 2
+  offload_optimizer_device: none
+  offload_param_device: none
+  gradient_accumulation_steps: 1
+  gradient_clipping: 0.0
   zero3_init_flag: false
   zero3_save_16bit_model: false

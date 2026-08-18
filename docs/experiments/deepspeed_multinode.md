@@ -24,10 +24,11 @@ Gaze-DP training process.
 `accelerate/2node-16gpu-deepspeed-bf16.yaml` selects Accelerate's DeepSpeed
 backend with 2 machines and 16 total processes. It uses the `standard`
 multi-node launcher so both nodes start their own local 8-process group; this
-does not depend on a DeepSpeed `pdsh` hostfile. The accompanying JSON selects
-bf16 and ZeRO stage 2 with automatic batch and gradient-accumulation values.
-The automatic values are important because the training config remains the
-source of truth for micro-batch size and accumulation.
+does not depend on a DeepSpeed `pdsh` hostfile. ZeRO stage 2 and its offload
+settings are inline in the Accelerate YAML. The top-level `mixed_precision:
+bf16` is intentional because the training workspace validates the accelerator
+AMP mode; using a separate `deepspeed_config_file` with Accelerate 1.12 would
+reject that field as a duplicate.
 
 The current training workspace saves a custom `BaseWorkspace` checkpoint, not a
 native DeepSpeed checkpoint directory. The smoke test must therefore verify
