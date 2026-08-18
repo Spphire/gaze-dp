@@ -7,7 +7,7 @@ cd "$ROOT"
 # Launch this script once on each host. The two processes must share the same
 # checkout, dataset, and output directory; only MACHINE_RANK differs.
 MACHINE_RANK="${MACHINE_RANK:?Set MACHINE_RANK to 0 on the rendezvous host or 1 on the second host.}"
-MAIN_PROCESS_IP="${MAIN_PROCESS_IP:-10.0.8.64}"
+MAIN_PROCESS_IP="${MAIN_PROCESS_IP:-10.0.8.78}"
 MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-29500}"
 CONFIG_NAME="${CONFIG_NAME:-train_gaze_wam_robot_a_image_only_workspace}"
 OUTPUT_DIR="${OUTPUT_DIR:-data/outputs/deepspeed_multinode_smoke}"

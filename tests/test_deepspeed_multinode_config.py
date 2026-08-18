@@ -8,7 +8,7 @@ def test_multinode_accelerate_config_has_fixed_world_size_and_rendezvous():
     text = (ROOT / "accelerate" / "2node-16gpu-deepspeed-bf16.yaml").read_text()
 
     assert "distributed_type: DEEPSPEED" in text
-    assert "main_process_ip: 10.0.8.64" in text
+    assert "main_process_ip: 10.0.8.78" in text
     assert "main_process_port: 29500" in text
     assert "num_machines: 2" in text
     assert "num_processes: 16" in text

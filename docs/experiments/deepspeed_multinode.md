@@ -7,12 +7,12 @@ directories.
 
 ## Candidate hosts
 
-The first planned pair is:
+The verified smoke-test pair is:
 
 | machine | internal address | `MACHINE_RANK` |
 | --- | --- | ---: |
-| H200-4065 | `10.0.8.64` | 0 |
-| H200-4066 | `10.0.8.78` | 1 |
+| H200-4066 | `10.0.8.78` | 0 |
+| H200-4068 | `10.0.8.66` | 1 |
 
 The rendezvous host is rank 0. Both hosts must be reachable over TCP port
 `29500`, see the same repository and dataset paths, and have the same Python
@@ -42,15 +42,15 @@ Use a new output directory on the shared workspace. Start both commands within
 the same rendezvous window:
 
 ```bash
-# H200-4065
+# H200-4066
 cd /mnt/workspace/shenyibo/gaze-proj-deepspeed
-MACHINE_RANK=0 MAIN_PROCESS_IP=10.0.8.64 \
+MACHINE_RANK=0 MAIN_PROCESS_IP=10.0.8.78 \
   OUTPUT_DIR=data/outputs/deepspeed_smoke_$(date +%Y%m%d_%H%M%S) \
   ./train_scripts/train_gaze_wam_deepspeed_multinode.sh
 
-# H200-4066: use the exact same OUTPUT_DIR printed/selected above
+# H200-4068: use the exact same OUTPUT_DIR printed/selected above
 cd /mnt/workspace/shenyibo/gaze-proj-deepspeed
-MACHINE_RANK=1 MAIN_PROCESS_IP=10.0.8.64 \
+MACHINE_RANK=1 MAIN_PROCESS_IP=10.0.8.78 \
   OUTPUT_DIR=data/outputs/deepspeed_smoke_<run_id> \
   ./train_scripts/train_gaze_wam_deepspeed_multinode.sh
 ```
