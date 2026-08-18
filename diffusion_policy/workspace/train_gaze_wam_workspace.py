@@ -112,6 +112,21 @@ def _ensure_optimizer_initial_lr_for_resume(optimizer, base_lr, obs_encoder_lr):
             group["initial_lr"] = base_lr
 
 
+def _restore_runtime_normalizer(accelerator, model, ema_model, normalizer):
+    """Rebind runtime normalizer state after native engine state restoration.
+
+    DeepSpeed restores the prepared model state, including the policy's
+    ``ParameterDict``-backed normalizer module. The normalizer state is
+    intentionally persisted separately because it is also needed by the
+    workspace/inference checkpoint. Re-applying it after ``load_state``
+    restores the complete runtime key set (camera and action) without
+    changing any model or optimizer checkpoint state.
+    """
+    accelerator.unwrap_model(model).set_normalizer(normalizer)
+    if ema_model is not None:
+        ema_model.set_normalizer(normalizer)
+
+
 def _deepspeed_state_checkpoint_path(output_dir, global_step):
     return pathlib.Path(output_dir).joinpath(
         "checkpoints",
@@ -2467,6 +2482,12 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                 accelerator.load_state(
                     str(deepspeed_resume_path),
                     load_module_strict=False,
+                )
+                _restore_runtime_normalizer(
+                    accelerator=accelerator,
+                    model=self.model,
+                    ema_model=self.ema_model,
+                    normalizer=normalizer,
                 )
                 print(
                     "Restored DeepSpeed model, optimizer, scheduler, and RNG state "

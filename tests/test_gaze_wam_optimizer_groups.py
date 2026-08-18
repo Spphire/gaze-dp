@@ -6,6 +6,7 @@ from diffusion_policy.policy.gaze_wam_policy import GazeWamPolicy
 from diffusion_policy.workspace.train_gaze_wam_workspace import (
     _deepspeed_state_checkpoint_path,
     _retain_deepspeed_state_checkpoints,
+    _restore_runtime_normalizer,
     _workspace_checkpoint_exclude_keys,
 )
 
@@ -69,3 +70,30 @@ def test_deepspeed_state_checkpoint_path_and_retention(tmp_path):
     assert not paths[0].exists()
     assert paths[1].is_dir()
     assert paths[2].is_dir()
+
+
+def test_deepspeed_resume_rebinds_normalizer_on_model_and_ema():
+    class FakePolicy:
+        def __init__(self):
+            self.normalizer = None
+
+        def set_normalizer(self, normalizer):
+            self.normalizer = normalizer
+
+    class FakeAccelerator:
+        def unwrap_model(self, model):
+            return model
+
+    model = FakePolicy()
+    ema_model = FakePolicy()
+    normalizer = object()
+
+    _restore_runtime_normalizer(
+        accelerator=FakeAccelerator(),
+        model=model,
+        ema_model=ema_model,
+        normalizer=normalizer,
+    )
+
+    assert model.normalizer is normalizer
+    assert ema_model.normalizer is normalizer
