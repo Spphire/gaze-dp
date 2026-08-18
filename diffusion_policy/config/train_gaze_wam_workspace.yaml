@@ -191,6 +191,8 @@ training:
   gdr_every: 100
   max_train_steps: null
   tqdm_interval_sec: 1.0
+  measure_step_performance: false
+  performance_warmup_steps: 3
   transfer:
     load_path: ""
     load_scope: obs_encoder
@@ -209,6 +211,7 @@ logging:
 
 checkpoint:
   keep_last_n: 5
+  save_deepspeed_state: true
   topk:
     # Robot validation is the gate for mixed training; open validation is diagnostic.
     monitor_key: val_robot_loss

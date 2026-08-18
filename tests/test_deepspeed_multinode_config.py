@@ -8,7 +8,7 @@ def test_multinode_accelerate_config_has_fixed_world_size_and_rendezvous():
     text = (ROOT / "accelerate" / "2node-16gpu-deepspeed-bf16.yaml").read_text()
 
     assert "distributed_type: DEEPSPEED" in text
-    assert "main_process_ip: 10.0.8.78" in text
+    assert "main_process_ip: 10.0.8.112" in text
     assert "main_process_port: 29500" in text
     assert "num_machines: 2" in text
     assert "num_processes: 16" in text
@@ -42,3 +42,16 @@ def test_multinode_launcher_validates_resume_flag():
     assert 'case "$RESUME" in' in text
     assert "true|false" in text
     assert "RESUME must be true or false" in text
+
+
+def test_deepspeed_state_save_remains_enabled_by_default_and_can_be_disabled():
+    config_text = (
+        ROOT / "diffusion_policy" / "config" / "train_gaze_wam_workspace.yaml"
+    ).read_text()
+    workspace_text = (
+        ROOT / "diffusion_policy" / "workspace" / "train_gaze_wam_workspace.py"
+    ).read_text()
+
+    assert "save_deepspeed_state: true" in config_text
+    assert "checkpoint.save_deepspeed_state" in workspace_text
+    assert "checkpoint_due and is_deepspeed and save_deepspeed_state" in workspace_text

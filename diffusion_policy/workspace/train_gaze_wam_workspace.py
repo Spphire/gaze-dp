@@ -16,6 +16,7 @@ import pathlib
 import pickle
 import random
 import shutil
+import time
 
 import cv2
 import hydra
@@ -323,6 +324,58 @@ def _distributed_scalar_sum(value: torch.Tensor) -> torch.Tensor:
     if dist.is_available() and dist.is_initialized():
         dist.all_reduce(value, op=dist.ReduceOp.SUM)
     return value
+
+
+def _distributed_scalar_max(value: torch.Tensor) -> torch.Tensor:
+    value = value.clone()
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(value, op=dist.ReduceOp.MAX)
+    return value
+
+
+def _gaze_wam_step_performance_metrics(
+    elapsed_seconds,
+    effective_batch_size,
+    global_step,
+    warmup_steps,
+    device,
+):
+    elapsed_tensor = torch.as_tensor(
+        float(elapsed_seconds),
+        device=device,
+        dtype=torch.float64,
+    )
+    elapsed_seconds_max = max(
+        _to_float(_distributed_scalar_max(elapsed_tensor)),
+        torch.finfo(torch.float64).eps,
+    )
+    result = {
+        "perf_step_seconds_max": elapsed_seconds_max,
+        "perf_effective_samples_per_second": (
+            float(effective_batch_size) / elapsed_seconds_max
+        ),
+        "perf_effective_batch_size": int(effective_batch_size),
+        "perf_is_warmup": int(global_step) < int(warmup_steps),
+    }
+    if device.type == "cuda":
+        bytes_per_gib = float(1024 ** 3)
+        allocated = torch.as_tensor(
+            torch.cuda.max_memory_allocated(device) / bytes_per_gib,
+            device=device,
+            dtype=torch.float64,
+        )
+        reserved = torch.as_tensor(
+            torch.cuda.max_memory_reserved(device) / bytes_per_gib,
+            device=device,
+            dtype=torch.float64,
+        )
+        result["perf_peak_cuda_memory_allocated_gib"] = _to_float(
+            _distributed_scalar_max(allocated)
+        )
+        result["perf_peak_cuda_memory_reserved_gib"] = _to_float(
+            _distributed_scalar_max(reserved)
+        )
+    return result
 
 
 class _NullJsonLogger:
@@ -2176,6 +2229,21 @@ class TrainGazeWamWorkspace(BaseWorkspace):
         require_amp = bool(cfg.training.get("require_amp", True))
         mixed_precision = str(getattr(accelerator, "mixed_precision", "no") or "no")
         is_deepspeed = accelerator.distributed_type == DistributedType.DEEPSPEED
+        measure_step_performance = normalize_gaze_wam_bool_field(
+            "training.measure_step_performance",
+            cfg.training.get("measure_step_performance", False),
+            default=False,
+        )
+        performance_warmup_steps = normalize_gaze_wam_nonnegative_int_field(
+            "training.performance_warmup_steps",
+            cfg.training.get("performance_warmup_steps", 3),
+            default=3,
+        )
+        save_deepspeed_state = normalize_gaze_wam_bool_field(
+            "checkpoint.save_deepspeed_state",
+            cfg.checkpoint.get("save_deepspeed_state", True),
+            default=True,
+        )
         if require_amp and mixed_precision not in ("bf16", "fp16"):
             raise RuntimeError(
                 "Gaze-WAM training requires AMP. Launch with "
@@ -2517,6 +2585,13 @@ class TrainGazeWamWorkspace(BaseWorkspace):
         if accelerator.is_main_process:
             _write_training_contract_summary(training_contract, self.output_dir)
         device = accelerator.device
+        effective_train_batch_size = int(
+            training_contract["batching"][
+                "effective_train_batch_size_per_optimizer_step"
+            ]
+        )
+        if measure_step_performance and device.type == "cuda":
+            torch.cuda.reset_peak_memory_stats(device)
         if self.ema_model is not None:
             self.ema_model.to(device)
 
@@ -2552,6 +2627,9 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                     _RestartingDataLoaderIterator(open_dataloader, "open train")
                     if use_robot_data and use_open_data
                     else None
+                )
+                performance_window_started_at = (
+                    time.perf_counter() if measure_step_performance else None
                 )
                 with tqdm.tqdm(
                     train_epoch_dataloader,
@@ -2628,6 +2706,21 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                                     "lr": lr_scheduler.get_last_lr()[0],
                                 }
                             )
+                            if measure_step_performance:
+                                if device.type == "cuda":
+                                    torch.cuda.synchronize(device)
+                                current_step_log.update(
+                                    _gaze_wam_step_performance_metrics(
+                                        elapsed_seconds=(
+                                            time.perf_counter()
+                                            - performance_window_started_at
+                                        ),
+                                        effective_batch_size=effective_train_batch_size,
+                                        global_step=self.global_step,
+                                        warmup_steps=performance_warmup_steps,
+                                        device=device,
+                                    )
+                                )
                         gdr_every = cfg.training.get("gdr_every", 0)
                         should_log_gdr = (
                             optimizer_step_completed
@@ -2703,6 +2796,8 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                             self.global_step += 1
                             step_log = {}
                             step_log_has_optimizer_step = False
+                            if measure_step_performance:
+                                performance_window_started_at = time.perf_counter()
 
                         if reached_max_train_steps:
                             break
@@ -3159,7 +3254,7 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                         self.global_step += 1
                 self.epoch += 1
 
-                if checkpoint_due and is_deepspeed:
+                if checkpoint_due and is_deepspeed and save_deepspeed_state:
                     deepspeed_state_path = _deepspeed_state_checkpoint_path(
                         self.output_dir,
                         self.global_step,
