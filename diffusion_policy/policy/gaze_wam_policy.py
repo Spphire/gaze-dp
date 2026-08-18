@@ -496,22 +496,38 @@ class GazeWamPolicy(BaseImagePolicy):
         obs_encoder_weight_decay: float,
         betas: Tuple[float, float],
     ) -> torch.optim.Optimizer:
-        optim_groups = self.model.get_optim_groups(weight_decay=weight_decay)
-        optim_groups.append(
-            {
-                "params": self.gaze_encoder.parameters(),
-                "weight_decay": weight_decay,
-            }
-        )
-        if self.heatmap_image_decoder is not None and any(
-            param.requires_grad for param in self.heatmap_image_decoder.parameters()
-        ):
+        # PyTorch optimizers tolerate empty parameter groups, but DeepSpeed
+        # ZeRO does not: it attempts to flatten every group and torch.cat([])
+        # fails. Keep the optimizer contract identical while omitting empty
+        # groups before Accelerate prepares the DeepSpeed engine.
+        optim_groups = [
+            group
+            for group in self.model.get_optim_groups(weight_decay=weight_decay)
+            if len(group.get("params", ())) > 0
+        ]
+
+        gaze_params = list(self.gaze_encoder.parameters())
+        if gaze_params:
             optim_groups.append(
                 {
-                    "params": self.heatmap_image_decoder.parameters(),
+                    "params": gaze_params,
                     "weight_decay": weight_decay,
                 }
             )
+
+        if self.heatmap_image_decoder is not None:
+            heatmap_params = [
+                param
+                for param in self.heatmap_image_decoder.parameters()
+                if param.requires_grad
+            ]
+            if heatmap_params:
+                optim_groups.append(
+                    {
+                        "params": heatmap_params,
+                        "weight_decay": weight_decay,
+                    }
+                )
 
         backbone_params = list()
         other_obs_params = list()
@@ -530,19 +546,23 @@ class GazeWamPolicy(BaseImagePolicy):
                 "or set obs_encoder optimizer hyperparameters equal to the policy "
                 "defaults."
             )
-        optim_groups.append(
-            {
-                "params": backbone_params,
-                "weight_decay": obs_encoder_weight_decay,
-                "lr": obs_encoder_lr,
-            }
-        )
-        optim_groups.append(
-            {
-                "params": other_obs_params,
-                "weight_decay": obs_encoder_weight_decay,
-            }
-        )
+        if backbone_params:
+            optim_groups.append(
+                {
+                    "params": backbone_params,
+                    "weight_decay": obs_encoder_weight_decay,
+                    "lr": obs_encoder_lr,
+                }
+            )
+        if other_obs_params:
+            optim_groups.append(
+                {
+                    "params": other_obs_params,
+                    "weight_decay": obs_encoder_weight_decay,
+                }
+            )
+        if not optim_groups:
+            raise ValueError("Gaze-WAM optimizer has no trainable parameters.")
         return torch.optim.AdamW(optim_groups, lr=lr, betas=betas)
 
     def _encode_conditions(
