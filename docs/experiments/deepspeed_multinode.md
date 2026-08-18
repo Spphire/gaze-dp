@@ -7,17 +7,23 @@ directories.
 
 ## Candidate hosts
 
-The verified smoke-test pair is:
+The currently verified resume-test pair is:
 
 | machine | internal address | `MACHINE_RANK` |
 | --- | --- | ---: |
-| H200-4066 | `10.0.8.78` | 0 |
-| H200-4068 | `10.0.8.66` | 1 |
+| H200-4102 | `10.0.8.112` | 0 |
+| H200-4103 | `10.0.8.133` | 1 |
 
 The rendezvous host is rank 0. Both hosts must be reachable over TCP port
 `29500`, see the same repository and dataset paths, and have the same Python
-environment. Do not use nodes reserved for other experiments or any existing
-Gaze-DP training process.
+environment. Access these nodes with `ssh -p 4102 root@106.14.2.243` and
+`ssh -p 4103 root@106.14.2.243`. Do not use nodes reserved for other
+experiments or any existing Gaze-DP training process.
+
+On 2026-08-19, NCCL's automatically selected IB/GDRDMA transport connected all
+rings but stalled during ZeRO optimizer initialization on this pair. The same
+run completed over the `net0` socket transport. Until the IB path is diagnosed,
+set both `NCCL_IB_DISABLE=1` and `NCCL_SOCKET_IFNAME=net0` on both hosts.
 
 ## Configuration
 
@@ -30,11 +36,20 @@ bf16` is intentional because the training workspace validates the accelerator
 AMP mode; using a separate `deepspeed_config_file` with Accelerate 1.12 would
 reject that field as a duplicate.
 
-The current training workspace saves a custom `BaseWorkspace` checkpoint, not a
-native DeepSpeed checkpoint directory. The smoke test must therefore verify
-both optimizer/model stepping and this checkpoint path before a long run is
-considered valid. ZeRO-3 is intentionally not enabled until checkpoint restore
-and export semantics are audited.
+The training workspace saves two complementary checkpoint forms:
+
+- `checkpoints/latest.ckpt` is the custom `BaseWorkspace` checkpoint used for
+  inference, model/EMA restoration, configuration, epoch, and global step. In
+  DeepSpeed runs it deliberately excludes the partitioned optimizer state.
+- `checkpoints/accelerate_state_step_<step>/` is the native Accelerate and
+  DeepSpeed checkpoint used for exact training resume. It contains the model,
+  one ZeRO optimizer shard per rank, scheduler, dataloader sampler, and RNG
+  state.
+
+Resume first loads the workspace checkpoint to recover the run metadata, then
+loads the matching native state directory. The runtime normalizer is rebound
+from `normalizer_state.pt` after the native model load. ZeRO-3 remains disabled
+until its checkpoint and export semantics receive the same audit.
 
 ## Two-node smoke test
 
@@ -42,15 +57,17 @@ Use a new output directory on the shared workspace. Start both commands within
 the same rendezvous window:
 
 ```bash
-# H200-4066
+# H200-4102
 cd /mnt/workspace/shenyibo/gaze-proj-deepspeed
-MACHINE_RANK=0 MAIN_PROCESS_IP=10.0.8.78 \
+NCCL_IB_DISABLE=1 NCCL_SOCKET_IFNAME=net0 \
+MACHINE_RANK=0 MAIN_PROCESS_IP=10.0.8.112 \
   OUTPUT_DIR=data/outputs/deepspeed_smoke_$(date +%Y%m%d_%H%M%S) \
   ./train_scripts/train_gaze_wam_deepspeed_multinode.sh
 
-# H200-4068: use the exact same OUTPUT_DIR printed/selected above
+# H200-4103: use the exact same OUTPUT_DIR printed/selected above
 cd /mnt/workspace/shenyibo/gaze-proj-deepspeed
-MACHINE_RANK=1 MAIN_PROCESS_IP=10.0.8.78 \
+NCCL_IB_DISABLE=1 NCCL_SOCKET_IFNAME=net0 \
+MACHINE_RANK=1 MAIN_PROCESS_IP=10.0.8.112 \
   OUTPUT_DIR=data/outputs/deepspeed_smoke_<run_id> \
   ./train_scripts/train_gaze_wam_deepspeed_multinode.sh
 ```
@@ -65,8 +82,25 @@ debug-compatible config if the full robot dataset is not available. Verify:
    trusted-checkpoint path; and
 5. the output contains finite losses and matching global step counts.
 
-Until all five checks pass, this launcher is a research artifact only and must
-not replace the existing single-node training launcher.
+## Verified native resume
+
+Commit `eb18e2d` completed two consecutive 16-GPU resume runs on H200-4102 and
+H200-4103 using:
+
+```text
+data/outputs/deepspeed_resume_native_b2080e2_4102_4103
+step 4 -> step 5 -> step 6
+```
+
+Both runs restored model, ZeRO optimizer, scheduler, dataloader sampler, and
+RNG state before completing a forward/backward/optimizer step. Each new native
+checkpoint contains 16 optimizer shards. The second run restored
+`accelerate_state_step_000005` and wrote `accelerate_state_step_000006` without
+the previous missing `camera0_rgb` normalizer error.
+
+This validates checkpoint continuity on the tested socket path. The launcher
+remains a research artifact until a single-node versus two-node throughput
+benchmark is recorded and the current IB initialization stall is understood.
 
 ## Benchmark boundary
 
