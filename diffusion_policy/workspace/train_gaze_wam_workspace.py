@@ -8,6 +8,7 @@ if __name__ == "__main__":
     os.chdir(ROOT_DIR)
 
 import copy
+from contextlib import nullcontext
 import json
 import math
 import os
@@ -83,6 +84,17 @@ def _to_float(value):
     if isinstance(value, torch.Tensor):
         return value.detach().float().item()
     return float(value)
+
+
+def _gaze_wam_autocast(accelerator):
+    """Use native CUDA autocast for DeepSpeed's mixed-precision forward path."""
+    if accelerator.device.type != "cuda":
+        return nullcontext()
+    if accelerator.mixed_precision == "bf16":
+        return torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    if accelerator.mixed_precision == "fp16":
+        return torch.autocast(device_type="cuda", dtype=torch.float16)
+    return nullcontext()
 
 
 def _ensure_optimizer_initial_lr_for_resume(optimizer, base_lr, obs_encoder_lr):
@@ -2499,7 +2511,7 @@ class TrainGazeWamWorkspace(BaseWorkspace):
 
                         optimizer_step_completed = False
                         with accelerator.accumulate(self.model):
-                            with accelerator.autocast():
+                            with _gaze_wam_autocast(accelerator):
                                 components = self.model(
                                     batch,
                                     return_per_sample=True,
@@ -2710,7 +2722,7 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                                     ),
                                     shuffle=False,
                                 )
-                                with accelerator.autocast():
+                                with _gaze_wam_autocast(accelerator):
                                     components = self.model(
                                         batch,
                                         return_per_sample=True,
