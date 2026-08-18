@@ -21,9 +21,14 @@ environment. Access these nodes with `ssh -p 4102 root@106.14.2.243` and
 experiments or any existing Gaze-DP training process.
 
 On 2026-08-19, NCCL's automatically selected IB/GDRDMA transport connected all
-rings but stalled during ZeRO optimizer initialization on this pair. The same
-run completed over the `net0` socket transport. Until the IB path is diagnosed,
-set both `NCCL_IB_DISABLE=1` and `NCCL_SOCKET_IFNAME=net0` on both hosts.
+rings but stalled during ZeRO optimizer initialization on this pair. The cause
+was narrowed to unreliable automatic RoCE GID/HCA selection. Both hosts expose
+eight 200-Gbit/s RoCE v2 HCAs, with the usable IPv4 RoCE v2 address at GID
+index 3. Explicitly selecting `mlx5_0` through `mlx5_7` and GID 3 removes the
+stall and accelerates training. `train_scripts/configure_nccl_transport.sh`
+now validates this profile before launch. Use `NCCL_TRANSPORT=socket` only as
+the measured fallback, or `NCCL_TRANSPORT=inherit` for an explicitly managed
+environment.
 
 ## Configuration
 
@@ -59,15 +64,13 @@ the same rendezvous window:
 ```bash
 # H200-4102
 cd /mnt/workspace/shenyibo/gaze-proj-deepspeed
-NCCL_IB_DISABLE=1 NCCL_SOCKET_IFNAME=net0 \
-MACHINE_RANK=0 MAIN_PROCESS_IP=10.0.8.112 \
+NCCL_TRANSPORT=roce MACHINE_RANK=0 MAIN_PROCESS_IP=10.0.8.112 \
   OUTPUT_DIR=data/outputs/deepspeed_smoke_$(date +%Y%m%d_%H%M%S) \
   ./train_scripts/train_gaze_wam_deepspeed_multinode.sh
 
 # H200-4103: use the exact same OUTPUT_DIR printed/selected above
 cd /mnt/workspace/shenyibo/gaze-proj-deepspeed
-NCCL_IB_DISABLE=1 NCCL_SOCKET_IFNAME=net0 \
-MACHINE_RANK=1 MAIN_PROCESS_IP=10.0.8.112 \
+NCCL_TRANSPORT=roce MACHINE_RANK=1 MAIN_PROCESS_IP=10.0.8.112 \
   OUTPUT_DIR=data/outputs/deepspeed_smoke_<run_id> \
   ./train_scripts/train_gaze_wam_deepspeed_multinode.sh
 ```
@@ -111,7 +114,7 @@ steady-state step time, samples/sec, peak memory, and checkpoint time. A lower
 step time alone is not sufficient if checkpoint restore, validation, or data
 loading regresses.
 
-## Verified throughput benchmark
+## Initial socket throughput benchmark
 
 The benchmark launcher was run from commit `f65d0790db66ab079b59437d137e5884d3f959e0`
 with `train_gaze_wam_robot_a_image_only_workspace`, bf16, 12 optimizer steps,
@@ -176,12 +179,85 @@ The raw summaries are:
   batch-512 throughput while processing twice the global batch. Its memory
   returns close to the single-node level, as expected for the larger local
   batch.
-- The current socket transport and ZeRO-2 configuration therefore provides
+- The socket transport and ZeRO-2 configuration therefore provides
   memory scaling and checkpoint-correct multi-node execution, but no measured
-  training acceleration. Do not move the production branch to this launcher
-  based on these results. Diagnose the IB/GDRDMA initialization stall and
-  reduce inter-node communication overhead before retesting for speed.
+  training acceleration. These results motivated the explicit RoCE diagnosis
+  and retest below.
 
 After the benchmark completed, both nodes were checked for residual training
 processes and GPU allocations; no benchmark process remained and the GPUs were
 free.
+
+## Explicit RoCE v2 diagnosis
+
+Commit `3c7922fa584c9ce01c433948bb121d369cee7235` added a small torch-distributed
+all-reduce benchmark. It operates only on synthetic GPU tensors and does not
+read the dataset or start training. Both hosts reported eight active 200-Gbit/s
+Ethernet HCAs. Their stable cross-host RTT was approximately `0.07 ms`, and
+GID index 3 was confirmed as the IPv4 `RoCE v2` entry on every HCA.
+
+For the tested host pair, the required environment is:
+
+```bash
+NCCL_IB_DISABLE=0
+NCCL_SOCKET_IFNAME=net0
+NCCL_IB_HCA=mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7
+NCCL_IB_GID_INDEX=3
+```
+
+The launcher applies and validates these values when
+`NCCL_TRANSPORT=roce`, which is the research-branch default. The 256-MiB,
+20-step all-reduce results were:
+
+| world size | transport | mean collective (s) | algorithm GB/s | ring bus GB/s |
+| ---: | --- | ---: | ---: | ---: |
+| 2 | `net0` TCP | 0.11030 | 2.434 | 2.434 |
+| 2 | one RoCE rail, GID 3 | 0.01053 | 25.490 | 25.490 |
+| 16 | `net0` TCP | 0.09893 | 2.713 | 5.088 |
+| 16 | eight RoCE rails, GID 3 | 0.001419 | 189.212 | 354.772 |
+
+Raw outputs:
+
+```text
+data/outputs/nccl_tcp2_3c7922f.json
+data/outputs/nccl_roce2_gid3_3c7922f.json
+data/outputs/nccl_tcp16_3c7922f.json
+data/outputs/nccl_roce16_gid3_3c7922f.json
+```
+
+The 16-rank RoCE bus bandwidth is about `69.7x` the socket result. This proves
+that the high-speed fabric and NCCL/GDRDMA path are functional when the RoCE
+address and rails are selected explicitly.
+
+## Accelerated training benchmark
+
+The same model, data pipeline, bf16 mode, effective global batch 512, and
+optimizer-step count were then compared with the corrected transport. The
+short 12-step run produced `2361.608 samples/s` on 16 GPUs versus
+`1590.980 samples/s` on 8 GPUs, a `1.484x` throughput gain while retaining the
+ZeRO-2 per-GPU memory reduction from about `40.85` to `20.59 GiB`.
+
+A longer paired run used 100 optimizer steps and excluded 10 warm-up steps:
+
+| run | GPUs | steady steps | total steady time (s) | steady samples/s | p50 step (s) | p95 step (s) | peak allocated GiB/GPU |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| single-node DDP | 8 | 90 | 53.3597 | 863.573 | 0.3362 | 1.4693 | 41.24 |
+| two-node ZeRO-2, RoCE v2 | 16 | 90 | 26.1082 | 1764.960 | 0.2271 | 0.6549 | 20.59 |
+
+Artifacts:
+
+```text
+data/outputs/benchmark_multi16_roce_gid3_3c7922f_20260819/benchmark_summary.json
+data/outputs/benchmark_single8_long_3c7922f_20260819/benchmark_summary.json
+data/outputs/benchmark_multi16_roce_long_3c7922f_20260819/benchmark_summary.json
+```
+
+The long run completes the same 90 measured optimizer steps `2.044x` faster
+end to end. Median step time improves by `1.480x`; the larger end-to-end gain
+also reflects the second host sharing data decoding and input work. This is a
+real fixed-global-batch training acceleration, not a weak-scaling comparison.
+
+The production `gaze-wam-cleanup` branch remains unchanged. Before adopting
+this research launcher for long production jobs, run a checkpoint-enabled
+RoCE resume cycle and a multi-epoch stability test; the existing exact-resume
+test was performed on the socket fallback before the GID fix.

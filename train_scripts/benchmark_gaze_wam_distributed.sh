@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+source "$ROOT/train_scripts/configure_nccl_transport.sh"
 
 MODE="${MODE:?Set MODE to single or multinode.}"
 OUTPUT_DIR="${OUTPUT_DIR:?Set OUTPUT_DIR to a new benchmark output directory.}"
@@ -10,6 +11,7 @@ CONFIG_NAME="${CONFIG_NAME:-train_gaze_wam_robot_a_image_only_workspace}"
 BENCHMARK_STEPS="${BENCHMARK_STEPS:-12}"
 WARMUP_STEPS="${WARMUP_STEPS:-3}"
 EFFECTIVE_BATCH_SIZE="${EFFECTIVE_BATCH_SIZE:-512}"
+NUM_EPOCHS="${NUM_EPOCHS:-1}"
 LOGGING_MODE="${LOGGING_MODE:-disabled}"
 
 case "$MODE" in
@@ -35,6 +37,10 @@ if (( BENCHMARK_STEPS <= 0 )); then
   echo "BENCHMARK_STEPS must be positive." >&2
   exit 2
 fi
+if (( NUM_EPOCHS <= 0 )); then
+  echo "NUM_EPOCHS must be positive." >&2
+  exit 2
+fi
 if (( WARMUP_STEPS < 0 || WARMUP_STEPS >= BENCHMARK_STEPS )); then
   echo "WARMUP_STEPS must be nonnegative and smaller than BENCHMARK_STEPS." >&2
   exit 2
@@ -52,6 +58,10 @@ fi
 if [[ -z "$PYTHON_BIN" || ! -x "$PYTHON_BIN" ]]; then
   echo "Missing a Python launcher. Install the research environment first." >&2
   exit 1
+fi
+
+if [[ "$MODE" == "multinode" ]]; then
+  configure_gaze_wam_nccl_transport
 fi
 
 ARGS=(
@@ -72,7 +82,7 @@ ARGS+=(
   "robot_dataloader.batch_size=${PER_PROCESS_BATCH_SIZE}"
   "val_robot_dataloader.batch_size=${PER_PROCESS_BATCH_SIZE}"
   "data_mixing.total_batch_size_per_process=${PER_PROCESS_BATCH_SIZE}"
-  "training.num_epochs=1"
+  "training.num_epochs=${NUM_EPOCHS}"
   "training.max_train_steps=${BENCHMARK_STEPS}"
   "training.max_val_steps=1"
   "training.val_every=0"

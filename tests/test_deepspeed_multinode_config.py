@@ -44,6 +44,23 @@ def test_multinode_launcher_validates_resume_flag():
     assert "RESUME must be true or false" in text
 
 
+def test_multinode_launcher_uses_validated_nccl_transport_profile():
+    launcher_text = (
+        ROOT / "train_scripts" / "train_gaze_wam_deepspeed_multinode.sh"
+    ).read_text()
+    profile_text = (
+        ROOT / "train_scripts" / "configure_nccl_transport.sh"
+    ).read_text()
+
+    assert "source \"$ROOT/train_scripts/configure_nccl_transport.sh\"" in launcher_text
+    assert "configure_gaze_wam_nccl_transport" in launcher_text
+    assert 'NCCL_TRANSPORT:-roce' in profile_text
+    assert 'NCCL_ROCE_GID_INDEX:-3' in profile_text
+    assert "mlx5_0,mlx5_1,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_6,mlx5_7" in profile_text
+    assert 'gid_type" != "RoCE v2"' in profile_text
+    assert "NCCL_IB_DISABLE=1" in profile_text
+
+
 def test_deepspeed_state_save_remains_enabled_by_default_and_can_be_disabled():
     config_text = (
         ROOT / "diffusion_policy" / "config" / "train_gaze_wam_workspace.yaml"

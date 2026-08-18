@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+source "$ROOT/train_scripts/configure_nccl_transport.sh"
 
 # Launch this script once on each host. The two processes must share the same
 # checkout, dataset, and output directory; only MACHINE_RANK differs.
@@ -35,6 +36,8 @@ if [[ -z "$PYTHON_BIN" || ! -x "$PYTHON_BIN" ]]; then
   echo "Missing a Python launcher. Install the research environment first." >&2
   exit 1
 fi
+
+configure_gaze_wam_nccl_transport
 
 ARGS=(
   launch

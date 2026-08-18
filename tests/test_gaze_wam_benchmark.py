@@ -100,10 +100,14 @@ def test_distributed_benchmark_launcher_uses_equal_effective_batch_and_no_checkp
     ).read_text()
 
     assert 'EFFECTIVE_BATCH_SIZE="${EFFECTIVE_BATCH_SIZE:-512}"' in text
+    assert 'NUM_EPOCHS="${NUM_EPOCHS:-1}"' in text
     assert "NUM_PROCESSES=8" in text
     assert "NUM_PROCESSES=16" in text
     assert "PER_PROCESS_BATCH_SIZE=$((EFFECTIVE_BATCH_SIZE / NUM_PROCESSES))" in text
+    assert 'if [[ "$MODE" == "multinode" ]]; then' in text
+    assert "configure_gaze_wam_nccl_transport" in text
     assert "training.measure_step_performance=true" in text
+    assert "training.num_epochs=${NUM_EPOCHS}" in text
     assert "training.performance_warmup_steps=${WARMUP_STEPS}" in text
     assert "training.val_every=0" in text
     assert "training.max_val_steps=1" in text
