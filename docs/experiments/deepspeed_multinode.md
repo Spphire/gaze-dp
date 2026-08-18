@@ -110,3 +110,78 @@ data-loading settings. Record initialization time, warm-up step time,
 steady-state step time, samples/sec, peak memory, and checkpoint time. A lower
 step time alone is not sufficient if checkpoint restore, validation, or data
 loading regresses.
+
+## Verified throughput benchmark
+
+The benchmark launcher was run from commit `f65d0790db66ab079b59437d137e5884d3f959e0`
+with `train_gaze_wam_robot_a_image_only_workspace`, bf16, 12 optimizer steps,
+3 warm-up steps, validation/checkpointing disabled, and the same robot-A data
+pipeline. The two-node runs used `NCCL_IB_DISABLE=1` and
+`NCCL_SOCKET_IFNAME=net0`. The IB/GDRDMA path was not used because it stalls
+during ZeRO initialization on this host pair.
+
+The exact launcher shape was:
+
+```bash
+cd /mnt/workspace/shenyibo/gaze-proj-deepspeed
+
+# Single node, H200-4102, 8 GPUs, effective batch 512.
+MODE=single OUTPUT_DIR=data/outputs/benchmark_single8_f65d079_20260819 \
+  EFFECTIVE_BATCH_SIZE=512 BENCHMARK_STEPS=12 WARMUP_STEPS=3 \
+  ./train_scripts/benchmark_gaze_wam_distributed.sh
+
+# Two nodes, H200-4102 and H200-4103, 16 GPUs, effective batch 512.
+NCCL_IB_DISABLE=1 NCCL_SOCKET_IFNAME=net0 MODE=multinode MACHINE_RANK=0 \
+MAIN_PROCESS_IP=10.0.8.112 MAIN_PROCESS_PORT=29630 \
+OUTPUT_DIR=data/outputs/benchmark_multi16_f65d079_20260819 \
+EFFECTIVE_BATCH_SIZE=512 BENCHMARK_STEPS=12 WARMUP_STEPS=3 \
+./train_scripts/benchmark_gaze_wam_distributed.sh
+
+# Rank 1 uses the same command and output directory with MACHINE_RANK=1.
+# Weak-scaling run: two nodes, 16 GPUs, effective batch 1024, port 29631.
+NCCL_IB_DISABLE=1 NCCL_SOCKET_IFNAME=net0 MODE=multinode MACHINE_RANK=0 \
+MAIN_PROCESS_IP=10.0.8.112 MAIN_PROCESS_PORT=29631 \
+OUTPUT_DIR=data/outputs/benchmark_multi16_b1024_f65d079_20260819 \
+EFFECTIVE_BATCH_SIZE=1024 BENCHMARK_STEPS=12 WARMUP_STEPS=3 \
+./train_scripts/benchmark_gaze_wam_distributed.sh
+```
+
+Rank 1 used the same output directory, with `MACHINE_RANK=1`. The measured
+steady-state values are:
+
+| run | GPUs | effective batch | transport | steady samples/s | p50 step (s) | p95 step (s) | peak allocated GiB/GPU | peak reserved GiB/GPU |
+| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| single-node DDP | 8 | 512 | local GPU | 1590.98 | 0.3205 | 0.3326 | 40.85 | 42.48 |
+| two-node DeepSpeed ZeRO-2 | 16 | 512 | `net0` TCP sockets | 986.996 | 0.5199 | 0.5407 | 20.59 | 21.75 |
+| two-node DeepSpeed ZeRO-2 | 16 | 1024 | `net0` TCP sockets | 1615.584 | 0.6351 | 0.6630 | 38.37 | 39.93 |
+
+The raw summaries are:
+
+```text
+/mnt/workspace/shenyibo/gaze-proj-deepspeed/data/outputs/benchmark_single8_f65d079_20260819/benchmark_summary.json
+/mnt/workspace/shenyibo/gaze-proj-deepspeed/data/outputs/benchmark_multi16_f65d079_20260819/benchmark_summary.json
+/mnt/workspace/shenyibo/gaze-proj-deepspeed/data/outputs/benchmark_multi16_b1024_f65d079_20260819/benchmark_summary.json
+```
+
+### Interpretation
+
+- At the same effective global batch of 512, the 16-GPU two-node run reaches
+  `986.996 / 1590.980 = 0.620` of the single-node throughput. Its step time is
+  `1.61x` slower, so this configuration is not a fixed-batch speedup.
+- ZeRO-2 does reduce peak per-GPU memory at batch 512 from `40.85` to
+  `20.59 GiB` allocated, approximately half, which is the useful result of
+  this configuration.
+- The batch-1024 run is a weak-scaling probe, not an apples-to-apples speed
+  comparison. It reaches `1615.584 samples/s`, only `1.015x` the single-node
+  batch-512 throughput while processing twice the global batch. Its memory
+  returns close to the single-node level, as expected for the larger local
+  batch.
+- The current socket transport and ZeRO-2 configuration therefore provides
+  memory scaling and checkpoint-correct multi-node execution, but no measured
+  training acceleration. Do not move the production branch to this launcher
+  based on these results. Diagnose the IB/GDRDMA initialization stall and
+  reduce inter-node communication overhead before retesting for speed.
+
+After the benchmark completed, both nodes were checked for residual training
+processes and GPU allocations; no benchmark process remained and the GPUs were
+free.
