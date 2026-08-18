@@ -23,7 +23,10 @@ esac
 
 ACCELERATE_BIN="$ROOT/.venv/bin/accelerate"
 if [[ ! -x "$ACCELERATE_BIN" ]]; then
-  echo "Missing $ACCELERATE_BIN. Create the project venv first." >&2
+  ACCELERATE_BIN="$(command -v accelerate || true)"
+fi
+if [[ -z "$ACCELERATE_BIN" || ! -x "$ACCELERATE_BIN" ]]; then
+  echo "Missing an accelerate launcher. Install the project environment first." >&2
   exit 1
 fi
 
