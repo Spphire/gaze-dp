@@ -7,7 +7,7 @@ cd "$ROOT"
 # Launch this script once on each host. The two processes must share the same
 # checkout, dataset, and output directory; only MACHINE_RANK differs.
 MACHINE_RANK="${MACHINE_RANK:?Set MACHINE_RANK to 0 on the rendezvous host or 1 on the second host.}"
-MAIN_PROCESS_IP="${MAIN_PROCESS_IP:-10.0.8.78}"
+MAIN_PROCESS_IP="${MAIN_PROCESS_IP:?Set MAIN_PROCESS_IP to the internal address of the rank-0 host.}"
 MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-29500}"
 CONFIG_NAME="${CONFIG_NAME:-train_gaze_wam_robot_a_image_only_workspace}"
 OUTPUT_DIR="${OUTPUT_DIR:-data/outputs/deepspeed_multinode_smoke}"
@@ -15,10 +15,16 @@ NUM_EPOCHS="${NUM_EPOCHS:-1}"
 MAX_TRAIN_STEPS="${MAX_TRAIN_STEPS:-2}"
 MAX_VAL_STEPS="${MAX_VAL_STEPS:-2}"
 LOGGING_MODE="${LOGGING_MODE:-disabled}"
+RESUME="${RESUME:-false}"
 
 case "$MACHINE_RANK" in
   0|1) ;;
   *) echo "MACHINE_RANK must be 0 or 1, got: $MACHINE_RANK" >&2; exit 2 ;;
+esac
+
+case "$RESUME" in
+  true|false) ;;
+  *) echo "RESUME must be true or false, got: $RESUME" >&2; exit 2 ;;
 esac
 
 PYTHON_BIN="${PYTHON_BIN:-$ROOT/.venv/bin/python}"
@@ -43,6 +49,7 @@ ARGS=(
   "training.max_train_steps=${MAX_TRAIN_STEPS}"
   "training.max_val_steps=${MAX_VAL_STEPS}"
   "training.require_amp=true"
+  "training.resume=${RESUME}"
   "logging.mode=${LOGGING_MODE}"
 )
 

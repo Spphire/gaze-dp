@@ -24,8 +24,21 @@ def test_multinode_launcher_requires_explicit_rank_and_uses_research_config():
     ).read_text()
 
     assert 'MACHINE_RANK="${MACHINE_RANK:?Set MACHINE_RANK' in text
+    assert 'MAIN_PROCESS_IP="${MAIN_PROCESS_IP:?Set MAIN_PROCESS_IP' in text
     assert "--machine_rank" in text
     assert "--main_process_ip" in text
     assert "accelerate/2node-16gpu-deepspeed-bf16.yaml" in text
     assert '"$PYTHON_BIN" -m accelerate.commands.accelerate_cli' in text
     assert "training.max_train_steps=${MAX_TRAIN_STEPS}" in text
+    assert "training.resume=${RESUME}" in text
+
+
+def test_multinode_launcher_validates_resume_flag():
+    text = (
+        ROOT / "train_scripts" / "train_gaze_wam_deepspeed_multinode.sh"
+    ).read_text()
+
+    assert 'RESUME="${RESUME:-false}"' in text
+    assert 'case "$RESUME" in' in text
+    assert "true|false" in text
+    assert "RESUME must be true or false" in text
