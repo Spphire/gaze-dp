@@ -395,6 +395,7 @@ class _BaseGazeWamZarrDataset(BaseDataset):
         self,
         dataset_path: str,
         camera_key: str = "camera0_rgb",
+        camera_keys: Optional[Sequence[str]] = None,
         gaze_key: Optional[str] = "gaze_xy",
         heatmap_key: Optional[str] = "gaze_heatmap",
         n_obs_steps: int = 2,
@@ -419,7 +420,23 @@ class _BaseGazeWamZarrDataset(BaseDataset):
     ) -> None:
         super().__init__()
         self.dataset_path = dataset_path
-        self.camera_key = camera_key
+        self.camera_key = str(camera_key)
+        if camera_keys is None:
+            self.camera_keys = (self.camera_key,)
+        else:
+            if isinstance(camera_keys, (str, bytes)):
+                raise TypeError("camera_keys must be a sequence of zarr camera keys, not a string.")
+            normalized_camera_keys = tuple(str(key) for key in camera_keys)
+            if not normalized_camera_keys:
+                raise ValueError("camera_keys must contain at least one camera key.")
+            if len(set(normalized_camera_keys)) != len(normalized_camera_keys):
+                raise ValueError(f"camera_keys must be unique, got {normalized_camera_keys!r}.")
+            if self.camera_key not in normalized_camera_keys:
+                raise ValueError(
+                    f"camera_key {self.camera_key!r} must be included in camera_keys "
+                    f"{normalized_camera_keys!r}."
+                )
+            self.camera_keys = normalized_camera_keys
         self.gaze_key = as_optional_gaze_wam_key(gaze_key)
         self.heatmap_key = as_optional_gaze_wam_key(heatmap_key)
         self.n_obs_steps = _validate_positive_int("n_obs_steps", n_obs_steps)
@@ -479,6 +496,12 @@ class _BaseGazeWamZarrDataset(BaseDataset):
         self._zarr_store = store
         self.root = root
         self.data_group, self.episode_ends = _resolve_data_group(root)
+        missing_camera_keys = [key for key in self.camera_keys if key not in self.data_group]
+        if missing_camera_keys:
+            raise KeyError(
+                "Canonical Gaze-WAM zarr missing required camera key(s): "
+                f"{missing_camera_keys!r}."
+            )
         if self.gaze_key is None:
             raise ValueError("Canonical Gaze-WAM zarrs must configure a non-null point gaze key.")
         if self.gaze_key not in self.data_group:
@@ -584,15 +607,28 @@ class _BaseGazeWamZarrDataset(BaseDataset):
 
     def _sample_obs_and_gaze(self, idx: int):
         current_idx, episode_start, episode_end, _ = self.indices[idx]
-        image = _sample_history(
+        primary_image = _sample_history(
             self.data_group[self.camera_key],
             current_idx=current_idx,
             episode_start=episode_start,
             horizon=self.n_obs_steps,
             downsample_steps=self.obs_downsample_steps,
         )
-        source_image_size = _infer_image_hw(image)
-        image = _image_to_chw_float(image, image_size=self.image_size)
+        source_image_size = _infer_image_hw(primary_image)
+        images = {
+            self.camera_key: _image_to_chw_float(primary_image, image_size=self.image_size)
+        }
+        for camera_key in self.camera_keys:
+            if camera_key == self.camera_key:
+                continue
+            image = _sample_history(
+                self.data_group[camera_key],
+                current_idx=current_idx,
+                episode_start=episode_start,
+                horizon=self.n_obs_steps,
+                downsample_steps=self.obs_downsample_steps,
+            )
+            images[camera_key] = _image_to_chw_float(image, image_size=self.image_size)
         has_gaze_label_mask = self._sample_current_presence_mask(
             "has_gaze_label",
             current_idx=current_idx,
@@ -679,7 +715,7 @@ class _BaseGazeWamZarrDataset(BaseDataset):
             generated_heatmap_image = False
         result = {
             "obs": {
-                self.camera_key: torch.from_numpy(image),
+                key: torch.from_numpy(image) for key, image in images.items()
             },
             "gaze_xy": torch.from_numpy(gaze_xy),
             "heatmap": heatmap.unsqueeze(0).to(dtype=torch.float32),
@@ -736,7 +772,8 @@ class _BaseGazeWamZarrDataset(BaseDataset):
 
     def get_normalizer(self, **kwargs) -> LinearNormalizer:
         normalizer = LinearNormalizer()
-        normalizer[self.camera_key] = get_image_identity_normalizer()
+        for camera_key in self.camera_keys:
+            normalizer[camera_key] = get_image_identity_normalizer()
         normalizer["action"] = self._get_action_normalizer()
         return normalizer
 

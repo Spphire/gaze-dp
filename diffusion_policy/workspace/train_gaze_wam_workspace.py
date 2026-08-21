@@ -17,6 +17,7 @@ import pickle
 import random
 import shutil
 import time
+from typing import Optional
 
 import cv2
 import hydra
@@ -219,10 +220,31 @@ def _validate_gaze_wam_accumulation_flush_contract(accelerator) -> bool:
 def _gaze_wam_checkpoint_due(
     completed_epochs: int,
     checkpoint_every: int,
-    stop_after_epoch: bool,
+    terminal: bool,
+    completed_steps: int = 0,
+    checkpoint_every_steps: Optional[int] = None,
 ) -> bool:
-    """Always retain the terminal epoch when a global step budget stops a run."""
-    return bool(stop_after_epoch) or int(completed_epochs) % int(checkpoint_every) == 0
+    """Select step-based checkpoints when configured, retaining every terminal state."""
+    if terminal:
+        return True
+    if checkpoint_every_steps is not None:
+        return _gaze_wam_step_checkpoint_due(
+            completed_steps=completed_steps,
+            checkpoint_every_steps=checkpoint_every_steps,
+        )
+    return int(completed_epochs) % int(checkpoint_every) == 0
+
+
+def _gaze_wam_step_checkpoint_due(
+    completed_steps: int,
+    checkpoint_every_steps: Optional[int],
+) -> bool:
+    if checkpoint_every_steps is None:
+        return False
+    return (
+        int(completed_steps) > 0
+        and int(completed_steps) % int(checkpoint_every_steps) == 0
+    )
 
 
 def _new_train_window_log_accumulator():
@@ -1594,6 +1616,11 @@ def _build_training_contract_summary(
             ),
             "max_train_steps_scope": "global_optimizer_steps",
             "max_train_steps": training_config["max_train_steps"],
+            "num_epochs": training_config["num_epochs"],
+            "checkpoint_every_epochs": training_config["checkpoint_every"],
+            "checkpoint_every_optimizer_steps": training_config[
+                "checkpoint_every_steps"
+            ],
             "validation_primary_source": (
                 "robot"
                 if use_robot_data
@@ -2595,6 +2622,49 @@ class TrainGazeWamWorkspace(BaseWorkspace):
         if self.ema_model is not None:
             self.ema_model.to(device)
 
+        def save_recovery_checkpoint():
+            """Save a rank-synchronous native state plus the portable workspace state."""
+            if is_deepspeed and save_deepspeed_state:
+                deepspeed_state_path = _deepspeed_state_checkpoint_path(
+                    self.output_dir,
+                    self.global_step,
+                )
+                accelerator.wait_for_everyone()
+                accelerator.save_state(
+                    str(deepspeed_state_path),
+                    exclude_frozen_parameters=True,
+                )
+                accelerator.wait_for_everyone()
+                if accelerator.is_main_process:
+                    _retain_deepspeed_state_checkpoints(
+                        pathlib.Path(self.output_dir) / "checkpoints",
+                        keep_last_n=cfg.checkpoint.get("keep_last_n", 0),
+                    )
+                accelerator.wait_for_everyone()
+
+            if accelerator.is_main_process:
+                model_ddp = self.model
+                self.model = accelerator.unwrap_model(self.model)
+                try:
+                    if cfg.checkpoint.save_last_ckpt:
+                        self.save_checkpoint(
+                            exclude_keys=_workspace_checkpoint_exclude_keys(
+                                self,
+                                is_deepspeed=is_deepspeed,
+                            ),
+                            retain_last_n=int(
+                                cfg.checkpoint.get("keep_last_n", 0)
+                            ),
+                            retained_tag=(
+                                f"rolling-epoch={int(self.epoch):04d}"
+                                f"-step={int(self.global_step):06d}"
+                            ),
+                        )
+                    if cfg.checkpoint.save_last_snapshot:
+                        self.save_snapshot()
+                finally:
+                    self.model = model_ddp
+
         already_at_max_train_steps = (
             cfg.training.max_train_steps is not None
             and self.global_step >= cfg.training.max_train_steps
@@ -2796,6 +2866,13 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                             self.global_step += 1
                             step_log = {}
                             step_log_has_optimizer_step = False
+                            if _gaze_wam_step_checkpoint_due(
+                                completed_steps=self.global_step,
+                                checkpoint_every_steps=(
+                                    cfg.training.checkpoint_every_steps
+                                ),
+                            ):
+                                save_recovery_checkpoint()
                             if measure_step_performance:
                                 performance_window_started_at = time.perf_counter()
 
@@ -3236,12 +3313,6 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                         ]
                     self.model.train()
 
-                checkpoint_due = _gaze_wam_checkpoint_due(
-                    completed_epochs=self.epoch + 1,
-                    checkpoint_every=cfg.training.checkpoint_every,
-                    stop_after_epoch=stop_after_epoch,
-                )
-                should_save_checkpoint = checkpoint_due and accelerator.is_main_process
                 metric_dict = {}
                 if step_log:
                     if training_contract_log_pending:
@@ -3254,44 +3325,22 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                         self.global_step += 1
                 self.epoch += 1
 
-                if checkpoint_due and is_deepspeed and save_deepspeed_state:
-                    deepspeed_state_path = _deepspeed_state_checkpoint_path(
-                        self.output_dir,
-                        self.global_step,
-                    )
-                    accelerator.wait_for_everyone()
-                    accelerator.save_state(
-                        str(deepspeed_state_path),
-                        exclude_frozen_parameters=True,
-                    )
-                    accelerator.wait_for_everyone()
-                    if accelerator.is_main_process:
-                        _retain_deepspeed_state_checkpoints(
-                            pathlib.Path(self.output_dir) / "checkpoints",
-                            keep_last_n=cfg.checkpoint.get("keep_last_n", 0),
-                        )
-                    accelerator.wait_for_everyone()
+                checkpoint_due = _gaze_wam_checkpoint_due(
+                    completed_epochs=self.epoch,
+                    checkpoint_every=cfg.training.checkpoint_every,
+                    terminal=(
+                        stop_after_epoch
+                        or self.epoch >= cfg.training.num_epochs
+                    ),
+                    completed_steps=self.global_step,
+                    checkpoint_every_steps=cfg.training.checkpoint_every_steps,
+                )
+                if checkpoint_due:
+                    save_recovery_checkpoint()
 
-                if should_save_checkpoint:
+                if checkpoint_due and accelerator.is_main_process:
                     model_ddp = self.model
                     self.model = accelerator.unwrap_model(self.model)
-                    if cfg.checkpoint.save_last_ckpt:
-                        self.save_checkpoint(
-                            exclude_keys=_workspace_checkpoint_exclude_keys(
-                                self,
-                                is_deepspeed=is_deepspeed,
-                            ),
-                            retain_last_n=int(
-                                cfg.checkpoint.get("keep_last_n", 0)
-                            ),
-                            retained_tag=(
-                                f"rolling-epoch={int(self.epoch):04d}"
-                                f"-step={int(self.global_step):06d}"
-                            ),
-                        )
-                    if cfg.checkpoint.save_last_snapshot:
-                        self.save_snapshot()
-
                     topk_ckpt_path = None
                     monitor_key = cfg.checkpoint.topk.monitor_key
                     if monitor_key in metric_dict:

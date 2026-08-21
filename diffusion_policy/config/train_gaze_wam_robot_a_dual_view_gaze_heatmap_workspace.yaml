@@ -1,0 +1,41 @@
+defaults:
+  - train_gaze_wam_robot_only_workspace
+  - _self_
+
+name: train_gaze_wam_robot_a_dual_view_gaze_heatmap
+exp_name: "robot_a_dual_view_gaze_dropout_heatmap"
+
+task:
+  robot_dataset_path: data/gaze_wam_robot_20260814_from_162120_dual_view.zarr
+  n_obs_steps: 1
+  camera_keys: [camera0_rgb, camera1_rgb]
+  shape_meta:
+    obs:
+      camera1_rgb:
+        shape: ${task.image_shape}
+        type: rgb
+        horizon: ${task.n_obs_steps}
+  robot_gaze_dropout_prob: 0.2
+  robot_heatmap_on_gaze_dropout: true
+
+policy:
+  max_image_tokens: ${eval:'${task.n_obs_steps} * 2 * 256'}
+  max_obs_frames: ${eval:'${task.n_obs_steps} * 2'}
+  obs_encoder:
+    pretrained: false
+    checkpoint_path: data/checkpoints/dinov3/vit_base_patch16_dinov3.lvd1689m.safetensors
+
+data_mixing:
+  total_batch_size_per_process: 2
+
+robot_dataloader:
+  batch_size: 2
+
+val_robot_dataloader:
+  batch_size: 2
+
+training:
+  num_epochs: 1000
+
+checkpoint:
+  keep_last_n: 5

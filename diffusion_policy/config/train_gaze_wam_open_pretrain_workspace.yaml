@@ -5,9 +5,24 @@ defaults:
 name: train_gaze_wam_open_pretrain
 exp_name: "optional_open_pretrain_encoder_ablation"
 
+task:
+  # Pretrain from one RGB frame. Ground-truth gaze remains label-only and is
+  # converted to the heatmap target by the open-data path.
+  n_obs_steps: 1
+  # Split whole episodes so nearby frames never leak across train and val.
+  val_ratio: 0.05
+
+policy:
+  obs_encoder:
+    # Training nodes are offline; initialize DINOv3 from the shared checkpoint.
+    pretrained: false
+    checkpoint_path: data/checkpoints/dinov3/vit_base_patch16_dinov3.lvd1689m.safetensors
+
 data_mixing:
   batch_size_source: ratio
-  total_batch_size_per_process: 64
+  # Keep the per-GPU batch fixed; gradient accumulation below preserves GBS512
+  # for the initial two-node, 16-GPU launch.
+  total_batch_size_per_process: 16
   robot_ratio: 0.0
   open_ratio: 1.0
   robot_tail_policy: drop
@@ -16,12 +31,19 @@ data_mixing:
 
 training:
   stage: open_pretrain
-  # This is a global optimizer-step budget, deliberately explicit.
-  max_train_steps: 5000
-  num_epochs: 200
-  gradient_accumulate_every: 1
+  max_train_steps: null
+  num_epochs: 3000
+  # 16 samples/GPU * 16 GPUs * 2 accumulation steps = global batch 512.
+  # Override this to 1 when continuing on four 8-GPU nodes.
+  gradient_accumulate_every: 2
+  # The pretraining horizon can be extended without changing the LR curve.
+  lr_scheduler: constant_with_warmup
+  lr_warmup_steps: 2000
+  # Step-based checkpointing takes precedence over the legacy epoch cadence.
+  checkpoint_every: 1
+  checkpoint_every_steps: 30000
   freeze_encoder: false
   transfer:
     export_path: data/outputs/gaze_wam_open_pretrain_obs_encoder.pt
     export_scope: obs_encoder
-    export_overwrite: false
+    export_overwrite: true

@@ -25,6 +25,20 @@ def _normalize_optional_positive_int(name: str, value) -> Optional[int]:
     return normalize_gaze_wam_positive_int_field(name, value)
 
 
+class Fp32LayerNorm(nn.LayerNorm):
+    """Compute normalization in FP32 while preserving the surrounding dtype."""
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        output = F.layer_norm(
+            x.float(),
+            self.normalized_shape,
+            self.weight.float(),
+            None if self.bias is None else self.bias.float(),
+            self.eps,
+        )
+        return output.to(dtype=self.weight.dtype)
+
+
 @dataclass(frozen=True)
 class GazeWamWorldCache:
     """Per-layer heatmap/world-expert K/V cache consumed by action denoising."""
@@ -65,14 +79,14 @@ class ContextSelfBlock(nn.Module):
         self.n_head = n_head
         self.head_dim = n_emb // n_head
         self.scale = self.head_dim ** -0.5
-        self.ln_self = nn.LayerNorm(n_emb)
+        self.ln_self = Fp32LayerNorm(n_emb)
         self.query = nn.Linear(n_emb, n_emb)
         self.key = nn.Linear(n_emb, n_emb)
         self.value = nn.Linear(n_emb, n_emb)
         self.out = nn.Linear(n_emb, n_emb)
         self.attn_drop = nn.Dropout(p_drop_attn)
         self.resid_drop = nn.Dropout(p_drop_attn)
-        self.ln_mlp = nn.LayerNorm(n_emb)
+        self.ln_mlp = Fp32LayerNorm(n_emb)
         self.mlp = FeedForwardBlock(n_emb=n_emb, p_drop=p_drop_attn)
 
     def _reshape_heads(self, x: torch.Tensor) -> torch.Tensor:
@@ -143,13 +157,13 @@ class TargetDecoderBlock(nn.Module):
 
     def __init__(self, n_emb: int, n_head: int, p_drop_attn: float) -> None:
         super().__init__()
-        self.ln_attn = nn.LayerNorm(n_emb)
+        self.ln_attn = Fp32LayerNorm(n_emb)
         self.mixed_attn = CachedMixedAttention(
             n_emb=n_emb,
             n_head=n_head,
             p_drop_attn=p_drop_attn,
         )
-        self.ln_mlp = nn.LayerNorm(n_emb)
+        self.ln_mlp = Fp32LayerNorm(n_emb)
         self.mlp = FeedForwardBlock(n_emb=n_emb, p_drop=p_drop_attn)
 
     def forward(
@@ -284,9 +298,9 @@ class CachedDualStreamGazeWamTransformer(nn.Module):
             ]
         )
 
-        self.action_ln_f = nn.LayerNorm(n_emb)
+        self.action_ln_f = Fp32LayerNorm(n_emb)
         self.action_head = nn.Linear(n_emb, action_dim)
-        self.heatmap_ln_f = nn.LayerNorm(n_emb)
+        self.heatmap_ln_f = Fp32LayerNorm(n_emb)
         self.heatmap_head = nn.Linear(n_emb, heatmap_dim)
 
         self.apply(self._init_weights)

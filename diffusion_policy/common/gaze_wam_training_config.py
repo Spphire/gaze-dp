@@ -911,6 +911,12 @@ def validate_gaze_wam_training_config(cfg):
     )
     if error is not None:
         errors.append(error)
+    checkpoint_every_steps, error = _parse_optional_int_field(
+        "training.checkpoint_every_steps",
+        training.get("checkpoint_every_steps", None),
+    )
+    if error is not None:
+        errors.append(error)
     val_every, error = _parse_optional_int_field(
         "training.val_every",
         training.get("val_every", None),
@@ -983,6 +989,13 @@ def validate_gaze_wam_training_config(cfg):
         error = _positive_int_error(name, value)
         if error is not None:
             errors.append(error)
+    error = _positive_int_error(
+        "training.checkpoint_every_steps",
+        checkpoint_every_steps,
+        allow_none=True,
+    )
+    if error is not None:
+        errors.append(error)
     for name, value in (
         ("robot_dataloader.batch_size", robot_batch_size),
         ("open_dataloader.batch_size", open_batch_size),
@@ -1096,11 +1109,8 @@ def validate_gaze_wam_training_config(cfg):
                 f"training.stage={stage} requires checkpoint.topk.monitor_key="
                 f"val_robot_loss, got {monitor_key!r}."
             )
-    if stage == "open_pretrain" and max_train_steps is None:
-        errors.append(
-            "training.stage=open_pretrain requires an explicit positive "
-            "training.max_train_steps global step budget."
-        )
+    # Open pretraining may be bounded by either max_train_steps or num_epochs.
+    # num_epochs is already validated as a positive integer above.
     if stage in ("open_only", "open_pretrain") and open_batch_size <= 0:
         errors.append(
             f"training.stage={stage} requires a positive open-source batch quota."
@@ -1134,6 +1144,7 @@ def validate_gaze_wam_training_config(cfg):
         "gradient_accumulate_every": gradient_accumulate_every,
         "num_epochs": num_epochs,
         "checkpoint_every": checkpoint_every,
+        "checkpoint_every_steps": checkpoint_every_steps,
         "val_every": val_every,
         "sample_every": sample_every,
         "gdr_every": gdr_every,
@@ -1177,6 +1188,8 @@ def _normalize_gaze_wam_training_config(cfg, training_config):
     )
     cfg.training.num_epochs = int(training_config["num_epochs"])
     cfg.training.checkpoint_every = int(training_config["checkpoint_every"])
+    with open_dict(cfg.training):
+        cfg.training.checkpoint_every_steps = optional_int("checkpoint_every_steps")
     cfg.training.val_every = optional_int("val_every")
     cfg.training.sample_every = optional_int("sample_every")
     cfg.training.gdr_every = optional_int("gdr_every")

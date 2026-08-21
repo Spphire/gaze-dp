@@ -753,7 +753,7 @@ class GazeWamPolicy(BaseImagePolicy):
                 f"{tuple(self.heatmap_codec.image_size)}, got "
                 f"{tuple(heatmap_image.shape[-2:])}."
             )
-        heatmap_image = heatmap_image.to(device=gaze_xy.device, dtype=gaze_xy.dtype)
+        heatmap_image = heatmap_image.to(device=target.device, dtype=target.dtype)
         if not torch.all(torch.isfinite(heatmap_image)):
             raise ValueError("batch['heatmap_image'] must contain only finite values.")
         if torch.any(heatmap_image < 0.0):

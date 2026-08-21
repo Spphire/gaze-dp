@@ -212,6 +212,7 @@ from diffusion_policy.workspace.train_gaze_wam_workspace import (  # noqa: E402
     _check_training_dataloader_lengths,
     _check_training_dataset_lengths,
     _gaze_wam_checkpoint_due,
+    _gaze_wam_step_checkpoint_due,
     _make_cpu_generator,
     _normalize_gaze_wam_training_config,
     _normalize_gaze_wam_task_routing_config,
@@ -1349,6 +1350,64 @@ def test_cached_dual_stream_transformer_shapes_and_world_cache():
         raise AssertionError("Expected mismatched world cache batch to fail.")
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA BF16 autocast")
+def test_cached_dual_stream_transformer_bf16_autocast():
+    model = CachedDualStreamGazeWamTransformer(
+        action_dim=10,
+        heatmap_dim=16,
+        action_horizon=4,
+        heatmap_num_tokens=4,
+        max_image_tokens=8,
+        n_layer=2,
+        n_head=4,
+        n_emb=32,
+        p_drop_emb=0.0,
+        p_drop_attn=0.0,
+    ).cuda()
+    image_tokens = torch.randn(2, 8, 32, device="cuda")
+    gaze_token = torch.randn(2, 1, 32, device="cuda")
+    noisy_action = torch.randn(2, 4, 10, device="cuda")
+    noisy_heatmap = torch.randn(2, 4, 16, device="cuda")
+
+    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        output = model(
+            image_tokens=image_tokens,
+            gaze_token=gaze_token,
+            noisy_action=noisy_action,
+            noisy_heatmap=noisy_heatmap,
+            timestep=torch.tensor([2, 5], device="cuda"),
+        )
+
+    assert output.action.dtype == torch.bfloat16
+    assert output.heatmap.dtype == torch.bfloat16
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA BF16")
+def test_cached_dual_stream_transformer_native_bf16_weights():
+    model = CachedDualStreamGazeWamTransformer(
+        action_dim=10,
+        heatmap_dim=16,
+        action_horizon=4,
+        heatmap_num_tokens=4,
+        max_image_tokens=8,
+        n_layer=2,
+        n_head=4,
+        n_emb=32,
+        p_drop_emb=0.0,
+        p_drop_attn=0.0,
+    ).cuda().bfloat16()
+    output = model(
+        image_tokens=torch.randn(2, 8, 32, device="cuda", dtype=torch.bfloat16),
+        gaze_token=torch.randn(2, 1, 32, device="cuda", dtype=torch.bfloat16),
+        noisy_action=torch.randn(2, 4, 10, device="cuda", dtype=torch.bfloat16),
+        noisy_heatmap=torch.randn(2, 4, 16, device="cuda", dtype=torch.bfloat16),
+        timestep=torch.tensor([2, 5], device="cuda"),
+    )
+
+    assert output.action.dtype == torch.bfloat16
+    assert output.heatmap.dtype == torch.bfloat16
+
+
 def test_cached_dual_stream_policy_patchified_heatmap_prediction_decode(tmp_path):
     scheduler = DDPMScheduler(
         num_train_timesteps=10,
@@ -2187,6 +2246,9 @@ def test_gaze_wam_ablation_workspace_config_switches():
             config_name="train_gaze_wam_cached_dual_stream_workspace"
         )
         open_only_cfg = compose(config_name="train_gaze_wam_open_only_workspace")
+        open_pretrain_cfg = compose(
+            config_name="train_gaze_wam_open_pretrain_workspace"
+        )
         robot_finetune_cfg = compose(
             config_name="train_gaze_wam_robot_finetune_workspace"
         )
@@ -2228,6 +2290,26 @@ def test_gaze_wam_ablation_workspace_config_switches():
     assert open_only_cfg.policy.heatmap_dsnt_temperature == 0.1
     assert open_only_cfg.policy.heatmap_distribution_mode == "intensity_softplus"
     assert open_only_cfg.training.gdr_every == 0
+    assert open_pretrain_cfg.task.n_obs_steps == 1
+    assert open_pretrain_cfg.task.val_ratio == pytest.approx(0.05)
+    assert open_pretrain_cfg.task.open_dataset.n_obs_steps == 1
+    assert open_pretrain_cfg.task.open_dataset.val_ratio == pytest.approx(0.05)
+    assert open_pretrain_cfg.task.shape_meta.obs.camera0_rgb.horizon == 1
+    assert open_pretrain_cfg.policy.obs_encoder.pretrained is False
+    assert open_pretrain_cfg.policy.obs_encoder.checkpoint_path.endswith(
+        "vit_base_patch16_dinov3.lvd1689m.safetensors"
+    )
+    open_pretrain_training = validate_gaze_wam_training_config(open_pretrain_cfg)
+    assert open_pretrain_training["valid"] is True
+    assert open_pretrain_training["open_batch_size"] == 16
+    assert open_pretrain_training["batching"]["train_batch_size_per_process"] == 16
+    assert open_pretrain_training["gradient_accumulate_every"] == 2
+    assert open_pretrain_cfg.training.lr_scheduler == "constant_with_warmup"
+    assert open_pretrain_cfg.training.lr_warmup_steps == 2000
+    assert open_pretrain_cfg.training.checkpoint_every == 1
+    assert open_pretrain_cfg.training.checkpoint_every_steps == 30000
+    assert open_pretrain_cfg.training.max_train_steps is None
+    assert open_pretrain_cfg.training.num_epochs == 3000
     assert robot_finetune_cfg.training.stage == "robot_finetune"
     assert robot_finetune_cfg.robot_dataloader.batch_size > 0
     assert robot_finetune_cfg.open_dataloader.batch_size == 0
@@ -2272,6 +2354,12 @@ def test_gaze_wam_prepared_length_and_terminal_checkpoint_boundaries():
     assert _gaze_wam_checkpoint_due(3, 2, False) is False
     assert _gaze_wam_checkpoint_due(4, 2, False) is True
     assert _gaze_wam_checkpoint_due(3, 100, True) is True
+    assert _gaze_wam_step_checkpoint_due(29999, 30000) is False
+    assert _gaze_wam_step_checkpoint_due(30000, 30000) is True
+    assert _gaze_wam_step_checkpoint_due(60000, 30000) is True
+    assert _gaze_wam_checkpoint_due(4, 1, False, 29999, 30000) is False
+    assert _gaze_wam_checkpoint_due(4, 1, False, 30000, 30000) is True
+    assert _gaze_wam_checkpoint_due(4, 1, True, 30001, 30000) is True
 
 
 def test_gaze_wam_policy_training_root_wrappers_prefer_repo_imports():
@@ -2506,6 +2594,7 @@ def test_gaze_wam_training_config_normalization_applies_parsed_values():
     cfg.training.gradient_accumulate_every = "2"
     cfg.training.num_epochs = "3"
     cfg.training.checkpoint_every = "1"
+    cfg.training.checkpoint_every_steps = "30000"
     cfg.training.val_every = "1"
     cfg.training.sample_every = "0"
     cfg.training.gdr_every = "5"
@@ -2534,6 +2623,7 @@ def test_gaze_wam_training_config_normalization_applies_parsed_values():
     assert normalized_cfg.training.gradient_accumulate_every == 2
     assert normalized_cfg.training.num_epochs == 3
     assert normalized_cfg.training.checkpoint_every == 1
+    assert normalized_cfg.training.checkpoint_every_steps == 30000
     assert normalized_cfg.training.val_every == 1
     assert normalized_cfg.training.sample_every == 0
     assert normalized_cfg.training.gdr_every == 5
@@ -3351,6 +3441,44 @@ def test_gaze_wam_debug_workspace_logs_validation_metrics():
                 assert (sample_dir / name).exists()
         pred_overlay = cv2.imread(str(preview_dir / "pred_overlay.png"), cv2.IMREAD_UNCHANGED)
         assert pred_overlay.shape[:2] == (256, 256)
+
+
+def test_gaze_wam_dense_heatmap_target_matches_generated_target_dtype():
+    class FakeHeatmapCodec:
+        image_size = (4, 4)
+
+    class FakePolicy:
+        heatmap_codec = FakeHeatmapCodec()
+
+        @staticmethod
+        def _target_heatmap_image_from_xy(gaze_xy, valid_mask):
+            return torch.zeros(
+                gaze_xy.shape[0],
+                4,
+                4,
+                device=gaze_xy.device,
+                dtype=torch.float32,
+            )
+
+        @staticmethod
+        def _require_bool_vector(name, value, expected_length):
+            assert value.dtype == torch.bool
+            assert value.shape == (expected_length,)
+
+    batch = {
+        "heatmap_image": torch.ones(2, 1, 4, 4, dtype=torch.bfloat16),
+        "has_heatmap_image": torch.tensor([True, False]),
+    }
+    target = GazeWamPolicy._target_heatmap_image_from_batch_or_xy(
+        FakePolicy(),
+        batch=batch,
+        gaze_xy=torch.zeros(2, 2, dtype=torch.bfloat16),
+        valid_mask=torch.tensor([True, True]),
+    )
+
+    assert target.dtype == torch.float32
+    assert torch.allclose(target[0], torch.ones(4, 4))
+    assert torch.allclose(target[1], torch.zeros(4, 4))
 
 
 def test_gaze_wam_policy_mixed_batch_loss_and_inference(tmp_path):

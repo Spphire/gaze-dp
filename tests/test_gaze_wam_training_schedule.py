@@ -187,12 +187,11 @@ def test_stage_contract_requires_explicit_source_and_robot_validation_roles():
     assert valid_robot["valid"] is True
 
 
-def test_open_pretrain_requires_fixed_budget_export_and_validation():
+def test_open_pretrain_requires_export_and_validation_but_allows_epoch_budget():
     invalid = validate_gaze_wam_training_config(
         _stage_cfg("open_pretrain", 0, 4, val_open_batch=0)
     )
     assert not invalid["valid"]
-    assert any("max_train_steps" in error for error in invalid["errors"])
     assert any("export_path" in error for error in invalid["errors"])
     assert any("val_open_dataloader.batch_size" in error for error in invalid["errors"])
 
@@ -207,6 +206,18 @@ def test_open_pretrain_requires_fixed_budget_export_and_validation():
         )
     )
     assert valid["valid"] is True
+
+    epoch_bounded = validate_gaze_wam_training_config(
+        _stage_cfg(
+            "open_pretrain",
+            0,
+            4,
+            val_open_batch=4,
+            max_train_steps=None,
+            export_path="data/pretrain.pt",
+        )
+    )
+    assert epoch_bounded["valid"] is True
 
 
 def test_planned_optimizer_steps_flushes_accumulation_per_epoch():
@@ -255,10 +266,10 @@ def test_accumulation_contract_requires_epoch_boundary_flush():
 
 
 def test_checkpoint_schedule_uses_completed_epoch_count():
-    assert _gaze_wam_checkpoint_due(1, checkpoint_every=2, stop_after_epoch=False) is False
-    assert _gaze_wam_checkpoint_due(2, checkpoint_every=2, stop_after_epoch=False) is True
-    assert _gaze_wam_checkpoint_due(600, checkpoint_every=2, stop_after_epoch=False) is True
-    assert _gaze_wam_checkpoint_due(599, checkpoint_every=2, stop_after_epoch=True) is True
+    assert _gaze_wam_checkpoint_due(1, checkpoint_every=2, terminal=False) is False
+    assert _gaze_wam_checkpoint_due(2, checkpoint_every=2, terminal=False) is True
+    assert _gaze_wam_checkpoint_due(600, checkpoint_every=2, terminal=False) is True
+    assert _gaze_wam_checkpoint_due(599, checkpoint_every=2, terminal=True) is True
 
 
 def test_accelerate_flushes_partial_accumulation_at_epoch_end():
