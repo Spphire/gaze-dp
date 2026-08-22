@@ -3443,6 +3443,24 @@ def test_gaze_wam_debug_workspace_logs_validation_metrics():
         assert pred_overlay.shape[:2] == (256, 256)
 
 
+def test_gaze_wam_validation_preview_runs_under_amp_context():
+    workspace_source = (
+        Path(__file__).resolve().parents[1]
+        / "diffusion_policy"
+        / "workspace"
+        / "train_gaze_wam_workspace.py"
+    )
+    text = workspace_source.read_text(encoding="utf-8")
+    preview_call = text.index("val_preview_summary = _write_heatmap_preview(")
+    amp_context = text.rfind(
+        "with _gaze_wam_autocast(accelerator):", 0, preview_call
+    )
+    assert amp_context >= 0
+    assert text[amp_context:preview_call].count(
+        "with _gaze_wam_autocast(accelerator):"
+    ) == 1
+
+
 def test_gaze_wam_dense_heatmap_target_matches_generated_target_dtype():
     class FakeHeatmapCodec:
         image_size = (4, 4)

@@ -3089,21 +3089,25 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                                     gather_open_heatmap_mask.sum().item()
                                 )
                                 if should_save_val_preview and val_preview_summary is None:
-                                    val_preview_summary = _write_heatmap_preview(
-                                        policy=accelerator.unwrap_model(self.model),
-                                        batch=batch,
-                                        output_dir=self.output_dir,
-                                        epoch=self.epoch,
-                                        camera_key=cfg.task.camera_key,
-                                        max_samples=cfg.training.get(
-                                            "val_heatmap_preview_max_samples",
-                                            1,
-                                        ),
-                                        sample_seed=cfg.training.get(
-                                            "val_heatmap_preview_sample_seed",
-                                            None,
-                                        ),
-                                    )
+                                    # The diagnostic path runs the visual encoder again.
+                                    # Keep it under the same AMP context as validation;
+                                    # otherwise BF16 encoder weights receive FP32 images.
+                                    with _gaze_wam_autocast(accelerator):
+                                        val_preview_summary = _write_heatmap_preview(
+                                            policy=accelerator.unwrap_model(self.model),
+                                            batch=batch,
+                                            output_dir=self.output_dir,
+                                            epoch=self.epoch,
+                                            camera_key=cfg.task.camera_key,
+                                            max_samples=cfg.training.get(
+                                                "val_heatmap_preview_max_samples",
+                                                1,
+                                            ),
+                                            sample_seed=cfg.training.get(
+                                                "val_heatmap_preview_sample_seed",
+                                                None,
+                                            ),
+                                        )
 
                                 if (
                                     cfg.training.max_val_steps is not None
