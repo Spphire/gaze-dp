@@ -92,6 +92,22 @@ def test_deepspeed_state_save_remains_enabled_by_default_and_can_be_disabled():
     assert "accelerator.save_state" in workspace_text
 
 
+def test_deepspeed_world_size_change_can_skip_native_state_restore():
+    config_text = (
+        ROOT / "diffusion_policy" / "config" /
+        "train_gaze_wam_open_pretrain_workspace.yaml"
+    ).read_text()
+    workspace_text = (
+        ROOT / "diffusion_policy" / "workspace" /
+        "train_gaze_wam_workspace.py"
+    ).read_text()
+
+    assert "resume_deepspeed_state: true" in config_text
+    assert '"training.resume_deepspeed_state"' in workspace_text
+    assert "and resume_deepspeed_state" in workspace_text
+    assert "Skipped DeepSpeed-native state restore" in workspace_text
+
+
 def test_timed_launcher_records_rank_zero_wall_clock_and_exit_status():
     text = (
         ROOT / "train_scripts" / "launch_gaze_wam_deepspeed_timed.sh"

@@ -2271,6 +2271,11 @@ class TrainGazeWamWorkspace(BaseWorkspace):
             cfg.checkpoint.get("save_deepspeed_state", True),
             default=True,
         )
+        resume_deepspeed_state = normalize_gaze_wam_bool_field(
+            "training.resume_deepspeed_state",
+            cfg.training.get("resume_deepspeed_state", True),
+            default=True,
+        )
         if require_amp and mixed_precision not in ("bf16", "fp16"):
             raise RuntimeError(
                 "Gaze-WAM training requires AMP. Launch with "
@@ -2568,7 +2573,12 @@ class TrainGazeWamWorkspace(BaseWorkspace):
         self.model = prepared["model"]
         self.optimizer = prepared["optimizer"]
         lr_scheduler = prepared["lr_scheduler"]
-        if is_deepspeed and cfg.training.resume and self.global_step > 0:
+        if (
+            is_deepspeed
+            and cfg.training.resume
+            and self.global_step > 0
+            and resume_deepspeed_state
+        ):
             deepspeed_resume_path = _deepspeed_state_checkpoint_path(
                 self.output_dir,
                 self.global_step,
@@ -2594,6 +2604,16 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                     f"global_step={self.global_step}; restored model/global step from "
                     "the workspace checkpoint and initialized fresh optimizer state."
                 )
+        elif (
+            is_deepspeed
+            and cfg.training.resume
+            and self.global_step > 0
+            and accelerator.is_main_process
+        ):
+            print(
+                "Skipped DeepSpeed-native state restore; restored model/global step "
+                "from the workspace checkpoint and initialized fresh optimizer state."
+            )
         train_epoch_dataloader = robot_dataloader if use_robot_data else open_dataloader
         if train_epoch_dataloader is None:
             raise ValueError(
