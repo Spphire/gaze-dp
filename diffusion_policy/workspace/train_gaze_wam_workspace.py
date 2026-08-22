@@ -2174,6 +2174,54 @@ def _write_heatmap_preview(
     return summary
 
 
+def _write_checkpoint_heatmap_log(
+    output_dir: str,
+    global_step: int,
+    checkpoint_epoch: int,
+    preview_summary,
+):
+    """Materialize the validation preview next to the checkpoint step.
+
+    Validation previews are keyed by epoch, while recovery checkpoints are
+    keyed by optimizer step. Copying the small preview bundle gives each
+    checkpoint an unambiguous visual log without rerunning validation.
+    """
+    if not preview_summary:
+        return None
+    summary_path = pathlib.Path(
+        preview_summary.get("paths", {}).get("summary", "")
+    )
+    source_dir = summary_path.parent
+    if not summary_path.is_file() or not source_dir.is_dir():
+        return None
+
+    checkpoint_dir = (
+        pathlib.Path(output_dir)
+        / "media"
+        / "checkpoint_heatmap"
+        / f"step_{int(global_step):06d}"
+    )
+    shutil.copytree(source_dir, checkpoint_dir, dirs_exist_ok=True)
+    manifest_path = checkpoint_dir / "checkpoint_manifest.json"
+    manifest = {
+        "global_step": int(global_step),
+        "checkpoint_epoch": int(checkpoint_epoch),
+        "validation_epoch": int(preview_summary.get("epoch", -1)),
+        "source_preview_dir": str(source_dir),
+        "preview_dir": str(checkpoint_dir),
+        "summary": str(checkpoint_dir / "summary.json"),
+        "comparison": str(checkpoint_dir / "comparison.png"),
+        "samples": [
+            str(path)
+            for path in sorted(checkpoint_dir.glob("sample_*/comparison.png"))
+        ],
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    latest_manifest = checkpoint_dir.parent / "latest.json"
+    latest_manifest.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return str(manifest_path)
+
+
 class TrainGazeWamWorkspace(BaseWorkspace):
     include_keys = ["global_step", "epoch"]
 
@@ -2899,6 +2947,7 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                         if reached_max_train_steps:
                             break
 
+                val_preview_summary = None
                 val_epoch_dataloader = (
                     robot_val_dataloader if use_robot_data else open_val_dataloader
                 )
@@ -3361,6 +3410,26 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                 )
                 if checkpoint_due:
                     save_recovery_checkpoint()
+                    if (
+                        cfg.training.get("save_checkpoint_heatmap_preview", True)
+                        and accelerator.is_main_process
+                    ):
+                        checkpoint_heatmap_log_path = _write_checkpoint_heatmap_log(
+                            output_dir=self.output_dir,
+                            global_step=self.global_step,
+                            checkpoint_epoch=self.epoch,
+                            preview_summary=val_preview_summary,
+                        )
+                        if checkpoint_heatmap_log_path is not None:
+                            json_logger.log(
+                                {
+                                    "checkpoint_heatmap_preview_saved": 1,
+                                    "checkpoint_heatmap_preview_path": (
+                                        checkpoint_heatmap_log_path
+                                    ),
+                                },
+                                step=self.global_step,
+                            )
 
                 if checkpoint_due and accelerator.is_main_process:
                     model_ddp = self.model

@@ -217,6 +217,7 @@ from diffusion_policy.workspace.train_gaze_wam_workspace import (  # noqa: E402
     _normalize_gaze_wam_training_config,
     _normalize_gaze_wam_task_routing_config,
     _select_heatmap_preview_indices,
+    _write_checkpoint_heatmap_log,
     _validate_prepared_epoch_driver_length,
     validate_gaze_wam_training_config,
     validate_gaze_wam_task_routing_config,
@@ -1523,6 +1524,41 @@ def test_val_heatmap_preview_indices_support_seeded_nonprefix_selection():
     assert seeded_a.shape == (4,)
     assert not torch.equal(seeded_a, prefix)
     assert torch.equal(prefix, torch.tensor([0, 1, 2, 3]))
+
+
+def test_checkpoint_heatmap_log_materializes_epoch_preview_bundle(tmp_path):
+    source_dir = tmp_path / "media" / "val_heatmap" / "epoch_0003"
+    sample_dir = source_dir / "sample_000"
+    sample_dir.mkdir(parents=True)
+    (source_dir / "summary.json").write_text(
+        json.dumps(
+            {
+                "epoch": 3,
+                "paths": {"summary": str(source_dir / "summary.json")},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (source_dir / "comparison.png").write_bytes(b"comparison")
+    (sample_dir / "comparison.png").write_bytes(b"sample comparison")
+
+    manifest_path = _write_checkpoint_heatmap_log(
+        output_dir=str(tmp_path),
+        global_step=30000,
+        checkpoint_epoch=29,
+        preview_summary={
+            "epoch": 3,
+            "paths": {"summary": str(source_dir / "summary.json")},
+        },
+    )
+
+    manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    assert manifest["global_step"] == 30000
+    assert manifest["checkpoint_epoch"] == 29
+    assert manifest["validation_epoch"] == 3
+    assert Path(manifest["comparison"]).exists()
+    assert len(manifest["samples"]) == 1
+    assert (tmp_path / "media" / "checkpoint_heatmap" / "latest.json").exists()
 
 
 def test_checkpoint_preview_ema_summary_reports_effective_use():

@@ -187,6 +187,7 @@ training:
   val_mixing_seed: 100003
   sample_every: 1
   save_val_heatmap_preview: true
+  save_checkpoint_heatmap_preview: true
   val_heatmap_preview_max_samples: 4
   val_heatmap_preview_sample_seed: 42
   gdr_every: 100
