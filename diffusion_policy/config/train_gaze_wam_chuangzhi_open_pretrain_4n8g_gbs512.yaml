@@ -1,0 +1,29 @@
+defaults:
+  - train_gaze_wam_open_pretrain_workspace
+  - _self_
+
+name: train_gaze_wam_chuangzhi_open_pretrain_4n8g_gbs512
+exp_name: "chuangzhi_open_pretrain_4n8g_gbs512"
+
+task:
+  n_obs_steps: 1
+  # Open gaze is label-only. Generate the normalized Gaussian target online
+  # from gaze_xy instead of reading the previously broken dense heatmap.
+  gaze_key: gaze_xy
+  heatmap_key: null
+
+data_mixing:
+  total_batch_size_per_process: 16
+  robot_ratio: 0.0
+  open_ratio: 1.0
+
+training:
+  # 16 samples/process * 32 processes * 1 accumulation = GBS 512.
+  gradient_accumulate_every: 1
+  num_epochs: 3000
+  checkpoint_every_steps: 30000
+  save_val_heatmap_preview: true
+  save_checkpoint_heatmap_preview: true
+
+logging:
+  mode: disabled

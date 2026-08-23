@@ -1,0 +1,36 @@
+defaults:
+  - train_gaze_wam_mixed_dual_view_single_frame_workspace
+  - _self_
+
+name: train_gaze_wam_chuangzhi_mix_dual_single_frame_1n8g_gbs64
+exp_name: "chuangzhi_mix_dual_single_frame_shared_vit_1n8g_gbs64"
+
+task:
+  n_obs_steps: 1
+  camera_keys: [camera0_rgb, camera1_rgb]
+
+policy:
+  obs_encoder:
+    share_rgb_model: true
+
+data_mixing:
+  total_batch_size_per_process: 8
+
+robot_dataloader:
+  batch_size: 6
+
+open_dataloader:
+  batch_size: 2
+
+val_robot_dataloader:
+  batch_size: 6
+
+val_open_dataloader:
+  batch_size: 2
+
+training:
+  # 8 samples/process * 8 processes * 1 accumulation = GBS 64.
+  gradient_accumulate_every: 1
+
+logging:
+  mode: disabled
