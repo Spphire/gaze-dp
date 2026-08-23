@@ -44,6 +44,7 @@ val_ratio: 0.0
 camera_key: camera0_rgb
 camera_keys:
   - ${task.camera_key}
+open_camera_key_map: null
 gaze_key: gaze_xy
 # Heatmap supervision is generated online from normalized gaze_xy for the
 # DSNT/JS full-resolution objective. Keep zarr heatmap storage optional.
@@ -102,6 +103,7 @@ open_dataset:
   dataset_path: ${task.open_dataset_path}
   camera_key: ${task.camera_key}
   camera_keys: ${task.camera_keys}
+  camera_key_map: ${task.open_camera_key_map}
   gaze_key: ${task.gaze_key}
   heatmap_key: ${task.heatmap_key}
   n_obs_steps: ${task.n_obs_steps}

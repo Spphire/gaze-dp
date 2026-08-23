@@ -3565,6 +3565,19 @@ def test_gaze_wam_dense_heatmap_target_matches_generated_target_dtype():
     assert torch.allclose(target[0], torch.ones(4, 4))
     assert torch.allclose(target[1], torch.zeros(4, 4))
 
+    batch["heatmap_image"][0] = 0.0
+    try:
+        GazeWamPolicy._target_heatmap_image_from_batch_or_xy(
+            FakePolicy(),
+            batch=batch,
+            gaze_xy=torch.zeros(2, 2, dtype=torch.bfloat16),
+            valid_mask=torch.tensor([True, True]),
+        )
+    except ValueError as exc:
+        assert "dense targets must have positive spatial mass" in str(exc)
+    else:
+        raise AssertionError("Expected an all-zero active dense target to be rejected.")
+
 
 def test_gaze_wam_policy_mixed_batch_loss_and_inference(tmp_path):
     torch.manual_seed(2)
@@ -8878,6 +8891,71 @@ def test_gaze_wam_zarr_dataset_emits_optional_presence_masks():
 
         assert "heatmap_image" in open_sample
         assert open_sample["has_heatmap_image"].item() is False
+
+
+def test_gaze_wam_dataset_ignores_dense_heatmap_mask_when_heatmap_key_is_disabled():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        open_path = _write_gaze_wam_zarr(
+            Path(tmpdir) / "open_point.zarr",
+            include_action=False,
+        )
+        dataset = GazeWamOpenDataset(
+            dataset_path=str(open_path),
+            gaze_key="gaze_xy",
+            heatmap_key=None,
+            temporal_heatmap_mode="off",
+            n_obs_steps=2,
+            action_horizon=3,
+            image_size=(16, 16),
+            heatmap_token_grid=(4, 4),
+        )
+
+        sample = dataset[1]
+
+        assert sample["has_gaze_label"].item() is True
+        assert sample["has_heatmap_image"].item() is False
+        assert torch.count_nonzero(sample["heatmap_image"]).item() == 0
+
+        temporal_dataset = GazeWamOpenDataset(
+            dataset_path=str(open_path),
+            gaze_key="gaze_xy",
+            heatmap_key=None,
+            temporal_heatmap_mode="causal",
+            n_obs_steps=2,
+            action_horizon=3,
+            image_size=(16, 16),
+            heatmap_token_grid=(4, 4),
+        )
+        temporal_sample = temporal_dataset[1]
+
+        assert temporal_sample["has_heatmap_image"].item() is True
+        assert temporal_sample["heatmap_image"].sum().item() > 0.0
+
+
+def test_gaze_wam_open_dataset_can_alias_one_source_camera_to_two_model_inputs():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        open_path = _write_gaze_wam_zarr(
+            Path(tmpdir) / "open_point.zarr",
+            include_action=False,
+        )
+        dataset = GazeWamOpenDataset(
+            dataset_path=str(open_path),
+            camera_key="camera0_rgb",
+            camera_keys=("camera0_rgb", "camera1_rgb"),
+            camera_key_map={
+                "camera0_rgb": "camera0_rgb",
+                "camera1_rgb": "camera0_rgb",
+            },
+            n_obs_steps=1,
+            action_horizon=3,
+            image_size=(16, 16),
+            heatmap_token_grid=(4, 4),
+        )
+
+        sample = dataset[1]
+
+        assert set(sample["obs"]) == {"camera0_rgb", "camera1_rgb"}
+        assert torch.equal(sample["obs"]["camera0_rgb"], sample["obs"]["camera1_rgb"])
 
 
 def test_validate_gaze_wam_zarr_robot_open_and_missing_key():

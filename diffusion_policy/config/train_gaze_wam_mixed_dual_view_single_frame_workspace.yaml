@@ -1,0 +1,44 @@
+defaults:
+  - train_gaze_wam_mixed_single_view_single_frame_workspace
+  - _self_
+
+name: train_gaze_wam_mixed_dual_view_single_frame
+exp_name: "robot_a_open_mixed_dual_view_single_frame"
+
+task:
+  robot_dataset_path: data/gaze_wam_robot_20260814_from_162120_dual_view.zarr
+  camera_keys: [camera0_rgb, camera1_rgb]
+  open_camera_key_map:
+    camera0_rgb: camera0_rgb
+    camera1_rgb: camera0_rgb
+  shape_meta:
+    obs:
+      camera1_rgb:
+        shape: ${task.image_shape}
+        type: rgb
+        horizon: ${task.n_obs_steps}
+
+policy:
+  max_image_tokens: ${eval:'${task.n_obs_steps} * 2 * 256'}
+  max_obs_frames: ${eval:'${task.n_obs_steps} * 2'}
+  obs_encoder:
+    share_rgb_model: true
+
+data_mixing:
+  total_batch_size_per_process: 8
+
+robot_dataloader:
+  batch_size: 6
+
+open_dataloader:
+  batch_size: 2
+
+val_robot_dataloader:
+  batch_size: 6
+
+val_open_dataloader:
+  batch_size: 2
+
+training:
+  gradient_accumulate_every: 2
+

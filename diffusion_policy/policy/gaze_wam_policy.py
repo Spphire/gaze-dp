@@ -780,6 +780,12 @@ class GazeWamPolicy(BaseImagePolicy):
             )
         use_dense_target = valid_mask.to(device=gaze_xy.device) & has_heatmap_image
         if torch.any(use_dense_target):
+            dense_target_mass = heatmap_image.flatten(start_dim=1).sum(dim=-1)
+            if torch.any(use_dense_target & (dense_target_mass <= 0.0)):
+                raise ValueError(
+                    "batch['heatmap_image'] rows selected as dense targets must "
+                    "have positive spatial mass."
+                )
             target = target.clone()
             target[use_dense_target] = heatmap_image[use_dense_target]
         return target

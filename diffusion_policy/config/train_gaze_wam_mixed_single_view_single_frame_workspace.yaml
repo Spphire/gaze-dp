@@ -1,0 +1,45 @@
+defaults:
+  - train_gaze_wam_workspace
+  - _self_
+
+name: train_gaze_wam_mixed_single_view_single_frame
+exp_name: "robot_a_open_mixed_single_view_single_frame"
+
+task:
+  robot_dataset_path: data/gaze_wam_robot_20260814_from_162120.zarr
+  n_obs_steps: 1
+  val_ratio: 0.05
+
+policy:
+  obs_encoder:
+    pretrained: false
+    checkpoint_path: data/checkpoints/dinov3/vit_base_patch16_dinov3.lvd1689m.safetensors
+
+data_mixing:
+  batch_size_source: ratio
+  total_batch_size_per_process: 16
+  robot_ratio: 0.75
+  open_ratio: 0.25
+  robot_tail_policy: pad
+  open_tail_policy: pad
+  validation_tail_policy: keep
+
+robot_dataloader:
+  batch_size: 12
+
+open_dataloader:
+  batch_size: 4
+
+val_robot_dataloader:
+  batch_size: 12
+
+val_open_dataloader:
+  batch_size: 4
+
+training:
+  num_epochs: 600
+  gradient_accumulate_every: 1
+
+logging:
+  mode: disabled
+
