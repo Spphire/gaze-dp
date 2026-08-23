@@ -216,6 +216,7 @@ from diffusion_policy.workspace.train_gaze_wam_workspace import (  # noqa: E402
     _make_cpu_generator,
     _normalize_gaze_wam_training_config,
     _normalize_gaze_wam_task_routing_config,
+    _runtime_gradient_accumulation_steps,
     _select_heatmap_preview_indices,
     _write_checkpoint_heatmap_log,
     _validate_prepared_epoch_driver_length,
@@ -237,6 +238,36 @@ def _random_pose10(batch_shape):
     d6 = mat_to_rot6d(rot)
     gripper = np.random.uniform(0, 0.08, size=batch_shape + (1,))
     return np.concatenate([pos, d6, gripper], axis=-1)
+
+
+def test_runtime_gradient_accumulation_uses_deepspeed_plugin_value():
+    class DistributedTypeStub:
+        name = "DEEPSPEED"
+
+    class DeepSpeedPluginStub:
+        deepspeed_config = {"gradient_accumulation_steps": 1}
+
+    class StateStub:
+        deepspeed_plugin = DeepSpeedPluginStub()
+
+    class AcceleratorStub:
+        distributed_type = DistributedTypeStub()
+        state = StateStub()
+
+    steps, source = _runtime_gradient_accumulation_steps(AcceleratorStub(), 2)
+
+    assert steps == 1
+    assert source == "deepspeed_config"
+
+
+def test_runtime_gradient_accumulation_keeps_training_value_without_deepspeed():
+    class AcceleratorStub:
+        distributed_type = "NO"
+
+    steps, source = _runtime_gradient_accumulation_steps(AcceleratorStub(), 2)
+
+    assert steps == 2
+    assert source == "training_config"
 
 
 def _replace_zarr_array(group, name, values):

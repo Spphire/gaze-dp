@@ -190,6 +190,28 @@ def _planned_prepared_epoch_batches(dataloader, accelerator) -> int:
     )
 
 
+def _runtime_gradient_accumulation_steps(accelerator, configured_steps: int):
+    """Resolve the accumulation value that DeepSpeed actually applies."""
+    configured_steps = int(configured_steps)
+    distributed_type = getattr(accelerator, "distributed_type", "NO")
+    distributed_type = getattr(distributed_type, "name", str(distributed_type))
+    if str(distributed_type).upper() != "DEEPSPEED":
+        return configured_steps, "training_config"
+
+    state = getattr(accelerator, "state", None)
+    plugin = getattr(state, "deepspeed_plugin", None)
+    deepspeed_config = getattr(plugin, "deepspeed_config", None)
+    if isinstance(deepspeed_config, dict):
+        runtime_steps = deepspeed_config.get("gradient_accumulation_steps")
+        if (
+            isinstance(runtime_steps, int)
+            and not isinstance(runtime_steps, bool)
+            and runtime_steps > 0
+        ):
+            return int(runtime_steps), "deepspeed_config"
+    return configured_steps, "training_config_fallback"
+
+
 def _validate_prepared_epoch_driver_length(
     planned_batches: int,
     actual_batches: int,
@@ -850,7 +872,15 @@ def _build_training_contract_summary(
     total_batch_size = robot_batch_size + open_batch_size
     use_robot_data = robot_batch_size > 0
     use_open_data = open_batch_size > 0
-    gradient_accumulate_every = int(training_config["gradient_accumulate_every"])
+    configured_gradient_accumulate_every = int(
+        training_config["gradient_accumulate_every"]
+    )
+    gradient_accumulate_every, gradient_accumulation_source = (
+        _runtime_gradient_accumulation_steps(
+            accelerator,
+            configured_gradient_accumulate_every,
+        )
+    )
     robot_ratio = robot_batch_size / total_batch_size if total_batch_size > 0 else 0.0
     open_ratio = open_batch_size / total_batch_size if total_batch_size > 0 else 0.0
     num_processes = int(getattr(accelerator, "num_processes", 1) or 1)
@@ -1541,6 +1571,14 @@ def _build_training_contract_summary(
             "robot_ratio": float(robot_ratio),
             "open_ratio": float(open_ratio),
             "gradient_accumulate_every": gradient_accumulate_every,
+            "configured_gradient_accumulate_every": (
+                configured_gradient_accumulate_every
+            ),
+            "runtime_gradient_accumulate_every": gradient_accumulate_every,
+            "gradient_accumulation_source": gradient_accumulation_source,
+            "gradient_accumulation_config_matches_runtime": (
+                configured_gradient_accumulate_every == gradient_accumulate_every
+            ),
             "effective_robot_batch_size_per_optimizer_step": effective_robot_batch_size,
             "effective_open_batch_size_per_optimizer_step": effective_open_batch_size,
             "effective_train_batch_size_per_optimizer_step": effective_train_batch_size,
@@ -3423,12 +3461,13 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                         if checkpoint_heatmap_log_path is not None:
                             json_logger.log(
                                 {
+                                    "global_step": self.global_step,
+                                    "epoch": self.epoch,
                                     "checkpoint_heatmap_preview_saved": 1,
                                     "checkpoint_heatmap_preview_path": (
                                         checkpoint_heatmap_log_path
                                     ),
-                                },
-                                step=self.global_step,
+                                }
                             )
 
                 if checkpoint_due and accelerator.is_main_process:
