@@ -1,4 +1,5 @@
 from pathlib import Path
+import inspect
 
 import numpy as np
 import zarr
@@ -6,6 +7,7 @@ import zarr
 from diffusion_policy.dataset.gaze_wam_dataset import GazeWamOpenDataset
 from diffusion_policy.scripts.precompute_gaze_wam_heatmap_cache import (
     _parse_dataset_spec,
+    _process_dataset,
     _rank_range,
     _temporal_heatmap,
 )
@@ -40,6 +42,8 @@ def test_chuangzhi_heatmap_launcher_uses_fixed_4n8g_and_project_runtime():
     assert 'HEATMAP_CACHE_SAVE_DENSE:-false' in text
     config = (root / "accelerate" / "4node-32gpu-amp.yaml").read_text()
     assert "mixed_precision: 'no'" in config
+
+    assert "preview_count" in inspect.signature(_process_dataset).parameters
 
 
 def test_precompute_temporal_heatmap_matches_dataset(tmp_path):

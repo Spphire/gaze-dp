@@ -221,7 +221,6 @@ def _ensure_rank_arrays(
     token_shape: Tuple[int, int],
     save_dense: bool,
     resume: bool,
-    preview_count: int,
 ) -> Dict[str, np.memmap]:
     rank_dir.mkdir(parents=True, exist_ok=True)
     paths = {
@@ -317,6 +316,7 @@ def _process_dataset(
     current_weight: float,
     latent_scale: float,
     latent_offset: float,
+    preview_count: int,
     gaze_key: str,
     has_gaze_label_key: str,
     camera_key: str,
