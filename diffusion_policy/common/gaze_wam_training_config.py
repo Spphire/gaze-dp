@@ -917,6 +917,12 @@ def validate_gaze_wam_training_config(cfg):
     )
     if error is not None:
         errors.append(error)
+    latest_checkpoint_every_steps, error = _parse_optional_int_field(
+        "training.latest_checkpoint_every_steps",
+        training.get("latest_checkpoint_every_steps", None),
+    )
+    if error is not None:
+        errors.append(error)
     val_every, error = _parse_optional_int_field(
         "training.val_every",
         training.get("val_every", None),
@@ -992,6 +998,13 @@ def validate_gaze_wam_training_config(cfg):
     error = _positive_int_error(
         "training.checkpoint_every_steps",
         checkpoint_every_steps,
+        allow_none=True,
+    )
+    if error is not None:
+        errors.append(error)
+    error = _positive_int_error(
+        "training.latest_checkpoint_every_steps",
+        latest_checkpoint_every_steps,
         allow_none=True,
     )
     if error is not None:
@@ -1145,6 +1158,7 @@ def validate_gaze_wam_training_config(cfg):
         "num_epochs": num_epochs,
         "checkpoint_every": checkpoint_every,
         "checkpoint_every_steps": checkpoint_every_steps,
+        "latest_checkpoint_every_steps": latest_checkpoint_every_steps,
         "val_every": val_every,
         "sample_every": sample_every,
         "gdr_every": gdr_every,
@@ -1190,6 +1204,9 @@ def _normalize_gaze_wam_training_config(cfg, training_config):
     cfg.training.checkpoint_every = int(training_config["checkpoint_every"])
     with open_dict(cfg.training):
         cfg.training.checkpoint_every_steps = optional_int("checkpoint_every_steps")
+        cfg.training.latest_checkpoint_every_steps = optional_int(
+            "latest_checkpoint_every_steps"
+        )
     cfg.training.val_every = optional_int("val_every")
     cfg.training.sample_every = optional_int("sample_every")
     cfg.training.gdr_every = optional_int("gdr_every")

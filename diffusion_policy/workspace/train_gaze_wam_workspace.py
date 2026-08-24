@@ -2728,8 +2728,8 @@ class TrainGazeWamWorkspace(BaseWorkspace):
         if self.ema_model is not None:
             self.ema_model.to(device)
 
-        def save_recovery_checkpoint():
-            """Save a rank-synchronous native state plus the portable workspace state."""
+        def save_recovery_checkpoint(retain_rolling: bool = True):
+            """Save native state plus latest, optionally retaining an archive copy."""
             if is_deepspeed and save_deepspeed_state:
                 deepspeed_state_path = _deepspeed_state_checkpoint_path(
                     self.output_dir,
@@ -2758,12 +2758,18 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                                 self,
                                 is_deepspeed=is_deepspeed,
                             ),
-                            retain_last_n=int(
-                                cfg.checkpoint.get("keep_last_n", 0)
+                            retain_last_n=(
+                                int(cfg.checkpoint.get("keep_last_n", 0))
+                                if retain_rolling
+                                else 0
                             ),
                             retained_tag=(
-                                f"rolling-epoch={int(self.epoch):04d}"
-                                f"-step={int(self.global_step):06d}"
+                                (
+                                    f"rolling-epoch={int(self.epoch):04d}"
+                                    f"-step={int(self.global_step):06d}"
+                                )
+                                if retain_rolling
+                                else None
                             ),
                         )
                     if cfg.checkpoint.save_last_snapshot:
@@ -2972,13 +2978,22 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                             self.global_step += 1
                             step_log = {}
                             step_log_has_optimizer_step = False
-                            if _gaze_wam_step_checkpoint_due(
+                            latest_checkpoint_due = _gaze_wam_step_checkpoint_due(
+                                completed_steps=self.global_step,
+                                checkpoint_every_steps=(
+                                    cfg.training.latest_checkpoint_every_steps
+                                ),
+                            )
+                            archival_checkpoint_due = _gaze_wam_step_checkpoint_due(
                                 completed_steps=self.global_step,
                                 checkpoint_every_steps=(
                                     cfg.training.checkpoint_every_steps
                                 ),
-                            ):
-                                save_recovery_checkpoint()
+                            )
+                            if latest_checkpoint_due or archival_checkpoint_due:
+                                save_recovery_checkpoint(
+                                    retain_rolling=archival_checkpoint_due
+                                )
                             if measure_step_performance:
                                 performance_window_started_at = time.perf_counter()
 

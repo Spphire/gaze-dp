@@ -182,6 +182,7 @@ training:
   freeze_encoder: false
   checkpoint_every: 1
   checkpoint_every_steps: null
+  latest_checkpoint_every_steps: null
   val_every: 1
   max_val_steps: null
   val_mixing_seed: 100003

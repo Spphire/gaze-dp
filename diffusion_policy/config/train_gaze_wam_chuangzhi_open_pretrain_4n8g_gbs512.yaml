@@ -3,14 +3,29 @@ defaults:
   - _self_
 
 name: train_gaze_wam_chuangzhi_open_pretrain_4n8g_gbs512
-exp_name: "chuangzhi_open_pretrain_4n8g_gbs512"
+exp_name: "chuangzhi_open_pretrain_temporal_mixed_nll_4n8g_gbs512"
 
 task:
   n_obs_steps: 1
-  # Open gaze is label-only. Generate the normalized Gaussian target online
-  # from gaze_xy instead of reading the previously broken dense heatmap.
+  # Keep visual input single-frame while supervising with the episode-local
+  # bidirectional gaze density used by the temporal mixed-NLL objective.
   gaze_key: gaze_xy
   heatmap_key: null
+  temporal_heatmap_mode: bidirectional
+  temporal_heatmap_window_radius: 30
+  temporal_heatmap_beta: 10.0
+  temporal_heatmap_sigma_px: 6.0
+  temporal_heatmap_current_weight: 2.0
+
+policy:
+  heatmap_objective: diffusion
+  heatmap_loss_weight: 1.0
+  heatmap_token_kl_loss_weight: 0.0
+  heatmap_diffusion_final_loss_enabled: true
+  heatmap_final_loss_timestep_weighting: alpha_cumprod
+  heatmap_xy_loss_weight: 0.0
+  heatmap_point_nll_loss_weight: 0.05
+  heatmap_js_loss_weight: 0.10
 
 data_mixing:
   total_batch_size_per_process: 16
@@ -22,8 +37,14 @@ training:
   gradient_accumulate_every: 1
   num_epochs: 3000
   checkpoint_every_steps: 30000
+  latest_checkpoint_every_steps: 3000
+  measure_step_performance: true
   save_val_heatmap_preview: true
   save_checkpoint_heatmap_preview: true
+
+open_dataloader:
+  # Conservative first benchmark: keep GBS fixed while reducing GPFS/decoder stalls.
+  num_workers: 4
 
 logging:
   mode: disabled

@@ -12,12 +12,30 @@ def load_cfg(name):
         return compose(config_name=name)
 
 
-def test_chuangzhi_open_pretrain_is_4n8g_gbs512_with_point_heatmap_target():
+def assert_temporal_mixed_nll(cfg):
+    assert cfg.task.heatmap_key is None
+    assert cfg.task.temporal_heatmap_mode == "bidirectional"
+    assert cfg.task.temporal_heatmap_window_radius == 30
+    assert cfg.task.temporal_heatmap_beta == 10.0
+    assert cfg.task.temporal_heatmap_sigma_px == 6.0
+    assert cfg.task.temporal_heatmap_current_weight == 2.0
+    assert cfg.policy.heatmap_objective == "diffusion"
+    assert cfg.policy.heatmap_loss_weight == 1.0
+    assert cfg.policy.heatmap_token_kl_loss_weight == 0.0
+    assert cfg.policy.heatmap_diffusion_final_loss_enabled is True
+    assert cfg.policy.heatmap_final_loss_timestep_weighting == "alpha_cumprod"
+    assert cfg.policy.heatmap_xy_loss_weight == 0.0
+    assert cfg.policy.heatmap_point_nll_loss_weight == 0.05
+    assert cfg.policy.heatmap_js_loss_weight == 0.10
+    assert all(len(str(tag)) <= 64 for tag in cfg.logging.tags)
+
+
+def test_chuangzhi_open_pretrain_is_4n8g_gbs512_with_temporal_mixed_nll():
     cfg = load_cfg("train_gaze_wam_chuangzhi_open_pretrain_4n8g_gbs512")
 
+    assert_temporal_mixed_nll(cfg)
     assert cfg.task.n_obs_steps == 1
     assert cfg.task.gaze_key == "gaze_xy"
-    assert cfg.task.heatmap_key is None
     assert cfg.data_mixing.total_batch_size_per_process == 16
     assert cfg.data_mixing.robot_ratio == 0.0
     assert cfg.data_mixing.open_ratio == 1.0
@@ -25,6 +43,9 @@ def test_chuangzhi_open_pretrain_is_4n8g_gbs512_with_point_heatmap_target():
     assert 16 * 4 * 8 * cfg.training.gradient_accumulate_every == 512
     assert cfg.training.num_epochs == 3000
     assert cfg.training.checkpoint_every_steps == 30000
+    assert cfg.training.latest_checkpoint_every_steps == 3000
+    assert cfg.training.measure_step_performance is True
+    assert cfg.open_dataloader.num_workers == 4
     assert cfg.training.save_val_heatmap_preview is True
     assert cfg.training.save_checkpoint_heatmap_preview is True
 
@@ -32,6 +53,7 @@ def test_chuangzhi_open_pretrain_is_4n8g_gbs512_with_point_heatmap_target():
 def test_chuangzhi_dual_view_mix_is_single_frame_shared_vit_gbs64():
     cfg = load_cfg("train_gaze_wam_chuangzhi_mix_dual_single_frame_1n8g_gbs64")
 
+    assert_temporal_mixed_nll(cfg)
     assert cfg.task.n_obs_steps == 1
     assert list(cfg.task.camera_keys) == ["camera0_rgb", "camera1_rgb"]
     assert cfg.policy.obs_encoder.share_rgb_model is True
@@ -39,12 +61,14 @@ def test_chuangzhi_dual_view_mix_is_single_frame_shared_vit_gbs64():
     assert cfg.open_dataloader.batch_size == 2
     assert cfg.data_mixing.total_batch_size_per_process == 8
     assert cfg.training.gradient_accumulate_every == 1
+    assert cfg.training.measure_step_performance is True
     assert 8 * 1 * 8 * cfg.training.gradient_accumulate_every == 64
 
 
 def test_chuangzhi_wrist_mix_is_single_frame_single_view_gbs64():
     cfg = load_cfg("train_gaze_wam_chuangzhi_mix_wrist_single_frame_1n8g_gbs64")
 
+    assert_temporal_mixed_nll(cfg)
     assert cfg.task.n_obs_steps == 1
     assert cfg.task.camera_key == "camera0_rgb"
     assert list(cfg.task.camera_keys) == ["camera0_rgb"]
@@ -52,7 +76,42 @@ def test_chuangzhi_wrist_mix_is_single_frame_single_view_gbs64():
     assert cfg.open_dataloader.batch_size == 2
     assert cfg.data_mixing.total_batch_size_per_process == 8
     assert cfg.training.gradient_accumulate_every == 1
+    assert cfg.training.measure_step_performance is True
     assert 8 * 1 * 8 * cfg.training.gradient_accumulate_every == 64
+
+
+def test_chuangzhi_task_names_separate_temporal_mixed_nll_runs():
+    wrappers = (
+        "launch_chuangzhi_open_pretrain_4n8g_gbs512.sh",
+        "launch_chuangzhi_mix_dual_single_frame_1n8g_gbs64.sh",
+        "launch_chuangzhi_mix_wrist_single_frame_1n8g_gbs64.sh",
+    )
+    for wrapper in wrappers:
+        text = (ROOT / "train_scripts" / wrapper).read_text()
+        task_name_line = next(
+            line for line in text.splitlines() if line.startswith("export TASK_NAME=")
+        )
+        assert "temporal_mixed_nll" in task_name_line
+
+
+def test_chuangzhi_resume_wrappers_force_resume_and_validate_latest_checkpoint():
+    wrappers = {
+        "resume_chuangzhi_open_pretrain_4n8g_gbs512.sh":
+            "open_pretrain_temporal_mixed_nll_4n8g_gbs512",
+        "resume_chuangzhi_mix_wrist_single_frame_1n8g_gbs64.sh":
+            "mix_wrist_single_frame_temporal_mixed_nll_1n8g_gbs64",
+        "resume_chuangzhi_mix_dual_single_frame_1n8g_gbs64.sh":
+            "mix_dual_shared_vit_temporal_mixed_nll_1n8g_gbs64",
+    }
+    for wrapper, task_name in wrappers.items():
+        text = (ROOT / "train_scripts" / wrapper).read_text()
+        assert f'export TASK_NAME="{task_name}"' in text
+        assert 'export RESUME=true' in text
+        assert 'export OUTPUT_DIR="${OUTPUT_DIR:-$DEFAULT_RESUME_OUTPUT_DIR}"' in text
+        assert '"$OUTPUT_DIR/checkpoints/latest.ckpt"' in text
+        if "open_pretrain" in wrapper:
+            assert "accelerate_state_step_*" in text
+        assert 'launch_gaze_wam_chuangzhi_pet.sh' in text
 
 
 def test_chuangzhi_pet_launcher_maps_platform_topology_and_writes_node_logs():
@@ -78,6 +137,8 @@ def test_chuangzhi_pet_launcher_maps_platform_topology_and_writes_node_logs():
         "launcher_node${PET_NODE_RANK}.log",
         "environment_node${PET_NODE_RANK}.txt",
         "nvidia_smi_node${PET_NODE_RANK}.txt",
+        "gpu_monitor_node${PET_NODE_RANK}.csv",
+        "gpu_monitor_node${PET_NODE_RANK}.pid",
         "pip_freeze_node${PET_NODE_RANK}.txt",
         "environment_setup_node${PET_NODE_RANK}.log",
         "exit_code_node${PET_NODE_RANK}.txt",
@@ -87,6 +148,27 @@ def test_chuangzhi_pet_launcher_maps_platform_topology_and_writes_node_logs():
     ):
         assert filename in text
     assert "NCCL_DEBUG_FILE" in text
+    assert "--cfg=job" in text
+    assert 'CHUANGZHI_NCCL_DEBUG:-WARN' in text
+    assert 'CHUANGZHI_NCCL_DEBUG_SUBSYS:-INIT,NET' in text
+    assert "GPU_MONITOR_INTERVAL_SEC" in text
+    assert "stop_gpu_monitor" in text
+    for runtime_variable in (
+        "RUNTIME_ROOT",
+        "SHORT_TMP_ROOT",
+        'SHORT_TMP_ROOT="$ROOT/../.tmp"',
+        'export HOME="$RUNTIME_ROOT/home"',
+        'export TMPDIR="$SHORT_TMP_ROOT"',
+        'export XDG_CACHE_HOME="$RUNTIME_ROOT/xdg-cache"',
+        'export TORCH_EXTENSIONS_DIR="$RUNTIME_ROOT/torch-extensions"',
+        'export TORCHINDUCTOR_CACHE_DIR="$RUNTIME_ROOT/torch"',
+        'export TRITON_HOME="$RUNTIME_ROOT/triton"',
+        'export TRITON_CACHE_DIR="$RUNTIME_ROOT/triton"',
+        'export HF_HOME="$RUNTIME_ROOT/huggingface"',
+        'export WANDB_DIR="$RUNTIME_ROOT/wandb"',
+        'df -h "$ROOT" "$RUNTIME_ROOT" "$HOME" "$TMPDIR" /root',
+    ):
+        assert runtime_variable in text
     assert not any(
         line.startswith("export NCCL_ASYNC_ERROR_HANDLING=")
         for line in text.splitlines()

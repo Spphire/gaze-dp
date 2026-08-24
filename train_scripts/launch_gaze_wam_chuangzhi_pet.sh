@@ -64,9 +64,53 @@ run_id="$(printf '%s' "$raw_run_id" | tr -c 'A-Za-z0-9._-' '_')"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/data/outputs/chuangzhi/$TASK_NAME/$run_id}"
 mkdir -p "$OUTPUT_DIR"
 
+# Keep every runtime-generated file on the project GPFS volume.  The training
+# pods have a separate, small /root overlay; leaving these defaults untouched
+# can fill that overlay with Triton, TorchInductor, DeepSpeed, HF, or W&B data.
+RUNTIME_ROOT="$ROOT/data/runtime/chuangzhi/$TASK_NAME/$run_id/node${PET_NODE_RANK}"
+# Keep the base itself short: multiprocessing appends a ~38-character
+# ``pymp-*`` socket name, and Linux limits AF_UNIX paths to 108 bytes.
+SHORT_TMP_ROOT="$ROOT/../.tmp"
+mkdir -p \
+  "$RUNTIME_ROOT/home" \
+  "$RUNTIME_ROOT/tmp" \
+  "$RUNTIME_ROOT/xdg-cache" \
+  "$RUNTIME_ROOT/torch-extensions" \
+  "$RUNTIME_ROOT/triton" \
+  "$RUNTIME_ROOT/torch" \
+  "$RUNTIME_ROOT/huggingface" \
+  "$RUNTIME_ROOT/wandb" \
+  "$RUNTIME_ROOT/mplconfig" \
+  "$SHORT_TMP_ROOT"
+export HOME="$RUNTIME_ROOT/home"
+# Python multiprocessing uses AF_UNIX sockets below the 108-byte path limit;
+# keep TMPDIR short while still placing all temporary files on the project disk.
+export TMPDIR="$SHORT_TMP_ROOT"
+export TMP="$TMPDIR"
+export TEMP="$TMPDIR"
+export XDG_CACHE_HOME="$RUNTIME_ROOT/xdg-cache"
+export TORCH_EXTENSIONS_DIR="$RUNTIME_ROOT/torch-extensions"
+export TORCH_HOME="$RUNTIME_ROOT/torch"
+export TORCHINDUCTOR_CACHE_DIR="$RUNTIME_ROOT/torch"
+export TRITON_HOME="$RUNTIME_ROOT/triton"
+export TRITON_CACHE_DIR="$RUNTIME_ROOT/triton"
+export CUDA_CACHE_PATH="$RUNTIME_ROOT/torch/cuda-cache"
+export HF_HOME="$RUNTIME_ROOT/huggingface"
+export HUGGINGFACE_HUB_CACHE="$RUNTIME_ROOT/huggingface/hub"
+export TRANSFORMERS_CACHE="$RUNTIME_ROOT/huggingface/transformers"
+export WANDB_DIR="$RUNTIME_ROOT/wandb"
+export WANDB_CACHE_DIR="$RUNTIME_ROOT/wandb/cache"
+export WANDB_CONFIG_DIR="$RUNTIME_ROOT/wandb/config"
+export PIP_CACHE_DIR="$RUNTIME_ROOT/xdg-cache/pip"
+export UV_CACHE_DIR="$ROOT/.uv-cache"
+export MPLCONFIGDIR="$RUNTIME_ROOT/mplconfig"
+export PYTHONPYCACHEPREFIX="$RUNTIME_ROOT/pycache"
+
 NODE_LOG="$OUTPUT_DIR/launcher_node${PET_NODE_RANK}.log"
 ENV_LOG="$OUTPUT_DIR/environment_node${PET_NODE_RANK}.txt"
 GPU_LOG="$OUTPUT_DIR/nvidia_smi_node${PET_NODE_RANK}.txt"
+GPU_MONITOR_LOG="$OUTPUT_DIR/gpu_monitor_node${PET_NODE_RANK}.csv"
+GPU_MONITOR_PID_FILE="$OUTPUT_DIR/gpu_monitor_node${PET_NODE_RANK}.pid"
 PIP_LOG="$OUTPUT_DIR/pip_freeze_node${PET_NODE_RANK}.txt"
 EXIT_LOG="$OUTPUT_DIR/exit_code_node${PET_NODE_RANK}.txt"
 CONFIG_LOG="$OUTPUT_DIR/resolved_config_node${PET_NODE_RANK}.yaml"
@@ -108,9 +152,11 @@ export HYDRA_FULL_ERROR=1
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
 export WANDB_MODE="${WANDB_MODE:-offline}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
-export TORCH_DISTRIBUTED_DEBUG="${TORCH_DISTRIBUTED_DEBUG:-DETAIL}"
-export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
-export NCCL_DEBUG_SUBSYS="${NCCL_DEBUG_SUBSYS:-INIT,NET,COLL}"
+# Keep production logs small enough to be useful for post-mortem debugging.
+# Full distributed/NCCL traces remain available through explicit overrides.
+export TORCH_DISTRIBUTED_DEBUG="${TORCH_DISTRIBUTED_DEBUG:-OFF}"
+export NCCL_DEBUG="${CHUANGZHI_NCCL_DEBUG:-WARN}"
+export NCCL_DEBUG_SUBSYS="${CHUANGZHI_NCCL_DEBUG_SUBSYS:-INIT,NET}"
 export TORCH_NCCL_ASYNC_ERROR_HANDLING="${TORCH_NCCL_ASYNC_ERROR_HANDLING:-1}"
 export NCCL_DEBUG_FILE="${NCCL_DEBUG_FILE:-$OUTPUT_DIR/nccl_node${PET_NODE_RANK}_host%h_pid%p.log}"
 
@@ -144,7 +190,17 @@ export NCCL_DEBUG_FILE="${NCCL_DEBUG_FILE:-$OUTPUT_DIR/nccl_node${PET_NODE_RANK}
   getent hosts "$PET_MASTER_ADDR" 2>&1 || true
   ip -brief address 2>&1 || true
   echo "output_dir=$OUTPUT_DIR"
-  df -h "$ROOT" 2>&1 || true
+  echo "runtime_root=$RUNTIME_ROOT"
+  echo "HOME=$HOME"
+  echo "TMPDIR=$TMPDIR"
+  echo "XDG_CACHE_HOME=$XDG_CACHE_HOME"
+  echo "TORCH_EXTENSIONS_DIR=$TORCH_EXTENSIONS_DIR"
+  echo "TRITON_HOME=$TRITON_HOME"
+  echo "HF_HOME=$HF_HOME"
+  echo "WANDB_DIR=$WANDB_DIR"
+  echo "runtime_filesystems"
+  df -h "$ROOT" "$RUNTIME_ROOT" "$HOME" "$TMPDIR" /root 2>&1 || true
+  echo "runtime_filesystems_end"
 } > "$ENV_LOG"
 
 if command -v nvidia-smi >/dev/null 2>&1; then
@@ -152,6 +208,47 @@ if command -v nvidia-smi >/dev/null 2>&1; then
   nvidia-smi topo -m >> "$GPU_LOG" 2>&1 || true
 else
   echo "nvidia-smi is unavailable on $(hostname)." > "$GPU_LOG"
+fi
+
+# Capture runtime utilization independently of the training logger.  This is
+# deliberately a small CSV sampled every few seconds so it survives a sudden
+# worker/platform termination without producing another multi-GB debug log.
+GPU_MONITOR_INTERVAL_SEC="${CHUANGZHI_GPU_MONITOR_INTERVAL_SEC:-5}"
+if ! is_positive_int "$GPU_MONITOR_INTERVAL_SEC"; then
+  echo "CHUANGZHI_GPU_MONITOR_INTERVAL_SEC must be a positive integer." >&2
+  exit 2
+fi
+GPU_MONITOR_PID=""
+stop_gpu_monitor() {
+  if [[ -n "${GPU_MONITOR_PID:-}" ]] && kill -0 "$GPU_MONITOR_PID" 2>/dev/null; then
+    kill "$GPU_MONITOR_PID" 2>/dev/null || true
+    wait "$GPU_MONITOR_PID" 2>/dev/null || true
+  fi
+}
+trap stop_gpu_monitor EXIT
+if command -v nvidia-smi >/dev/null 2>&1; then
+  (
+    printf '%s\n' 'timestamp_utc,gpu_index,utilization_gpu_pct,utilization_memory_pct,memory_used_mib,memory_total_mib,power_draw_w'
+    while :; do
+      timestamp_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      sample="$(nvidia-smi \
+        --query-gpu=index,utilization.gpu,utilization.memory,memory.used,memory.total,power.draw \
+        --format=csv,noheader,nounits 2>/dev/null || true)"
+      if [[ -n "$sample" ]]; then
+        while IFS= read -r sample_line; do
+          [[ -z "$sample_line" ]] && continue
+          sample_line="${sample_line//, /,}"
+          printf '%s,%s\n' "$timestamp_utc" "$sample_line"
+        done <<< "$sample"
+      fi
+      sleep "$GPU_MONITOR_INTERVAL_SEC"
+    done
+  ) > "$GPU_MONITOR_LOG" 2>> "$NODE_LOG" &
+  GPU_MONITOR_PID=$!
+  printf '%s\n' "$GPU_MONITOR_PID" > "$GPU_MONITOR_PID_FILE"
+else
+  printf '%s\n' 'timestamp_utc,gpu_index,utilization_gpu_pct,utilization_memory_pct,memory_used_mib,memory_total_mib,power_draw_w' > "$GPU_MONITOR_LOG"
+  printf '%s\n' 'nvidia-smi unavailable' >> "$GPU_MONITOR_LOG"
 fi
 snapshot_uv="${UV_BIN:-$ROOT/.tools/uv}"
 if [[ -x "$snapshot_uv" ]]; then
@@ -163,7 +260,7 @@ fi
 # Hydra's config-only mode records the exact inherited values without loading data.
 "$PYTHON_BIN" train.py \
   "--config-name=${CONFIG_NAME}" \
-  --cfg job \
+  --cfg=job \
   --resolve \
   > "$CONFIG_LOG" 2>&1
 

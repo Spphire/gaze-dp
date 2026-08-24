@@ -3,12 +3,28 @@ defaults:
   - _self_
 
 name: train_gaze_wam_chuangzhi_mix_wrist_single_frame_1n8g_gbs64
-exp_name: "chuangzhi_mix_wrist_single_frame_1n8g_gbs64"
+exp_name: "chuangzhi_mix_wrist_single_frame_temporal_mixed_nll_1n8g_gbs64"
 
 task:
   n_obs_steps: 1
   camera_key: camera0_rgb
   camera_keys: [camera0_rgb]
+  heatmap_key: null
+  temporal_heatmap_mode: bidirectional
+  temporal_heatmap_window_radius: 30
+  temporal_heatmap_beta: 10.0
+  temporal_heatmap_sigma_px: 6.0
+  temporal_heatmap_current_weight: 2.0
+
+policy:
+  heatmap_objective: diffusion
+  heatmap_loss_weight: 1.0
+  heatmap_token_kl_loss_weight: 0.0
+  heatmap_diffusion_final_loss_enabled: true
+  heatmap_final_loss_timestep_weighting: alpha_cumprod
+  heatmap_xy_loss_weight: 0.0
+  heatmap_point_nll_loss_weight: 0.05
+  heatmap_js_loss_weight: 0.10
 
 data_mixing:
   total_batch_size_per_process: 8
@@ -28,6 +44,7 @@ val_open_dataloader:
 training:
   # 8 samples/process * 8 processes * 1 accumulation = GBS 64.
   gradient_accumulate_every: 1
+  measure_step_performance: true
 
 logging:
   mode: disabled

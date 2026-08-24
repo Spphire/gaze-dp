@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export TASK_NAME="open_pretrain_temporal_mixed_nll_4n8g_gbs512"
+export CONFIG_NAME="train_gaze_wam_chuangzhi_open_pretrain_4n8g_gbs512"
+export ACCELERATE_CONFIG="accelerate/4node-32gpu-deepspeed-bf16.yaml"
+export EXPECTED_NNODES=4
+export EXPECTED_NPROC_PER_NODE=8
+export RESUME=true
+
+# Reuse the stopped four-node run so the workspace can find latest.ckpt and
+# the matching DeepSpeed-native state directory.
+DEFAULT_RESUME_OUTPUT_DIR="$ROOT/data/outputs/chuangzhi/$TASK_NAME/job-4bfa7389-91e4-4a1f-96a1-be8b43c0d1fa-worker-0_23456"
+export OUTPUT_DIR="${OUTPUT_DIR:-$DEFAULT_RESUME_OUTPUT_DIR}"
+if [[ ! -s "$OUTPUT_DIR/checkpoints/latest.ckpt" ]]; then
+  echo "Resume checkpoint is missing or empty: $OUTPUT_DIR/checkpoints/latest.ckpt" >&2
+  exit 2
+fi
+if ! compgen -G "$OUTPUT_DIR/checkpoints/accelerate_state_step_*" > /dev/null; then
+  echo "DeepSpeed resume state is missing under: $OUTPUT_DIR/checkpoints" >&2
+  exit 2
+fi
+
+exec "$ROOT/train_scripts/launch_gaze_wam_chuangzhi_pet.sh" "$@"

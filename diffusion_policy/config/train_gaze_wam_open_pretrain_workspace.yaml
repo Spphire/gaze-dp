@@ -44,6 +44,8 @@ training:
   # Step-based checkpointing takes precedence over the legacy epoch cadence.
   checkpoint_every: 1
   checkpoint_every_steps: 30000
+  # Keep a recent rolling recovery point without increasing archival frequency.
+  latest_checkpoint_every_steps: null
   freeze_encoder: false
   transfer:
     export_path: data/outputs/gaze_wam_open_pretrain_obs_encoder.pt
