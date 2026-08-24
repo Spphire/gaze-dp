@@ -124,22 +124,64 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
   exit 1
 fi
 
-OPEN_TRAIN_ZARR="${OPEN_TRAIN_ZARR:-$ROOT/data/hot3d_open_train.zarr}"
-OPEN_VAL_ZARR="${OPEN_VAL_ZARR:-$ROOT/data/hot3d_open_val.zarr}"
-ROBOT_ZARR="${ROBOT_ZARR:-$ROOT/data/gaze_wam_robot_20260814_from_162120.zarr}"
 ENCODER_PATH="${HEATMAP_COSMOS_ENCODER:-$ROOT/data/checkpoints/cosmos_tokenizer/Cosmos-Tokenizer-CI16x16/encoder.jit}"
 DECODER_PATH="${HEATMAP_COSMOS_DECODER:-$ROOT/data/checkpoints/cosmos_tokenizer/Cosmos-Tokenizer-CI16x16/decoder.jit}"
 
-DATASET_ARGS=(
-  --dataset "open_train=$OPEN_TRAIN_ZARR"
-  --dataset "open_val=$OPEN_VAL_ZARR"
-  --dataset "robot=$ROBOT_ZARR"
-)
-if [[ "${HEATMAP_CACHE_SKIP_ROBOT:-false}" == "true" ]]; then
-  DATASET_ARGS=(
-    --dataset "open_train=$OPEN_TRAIN_ZARR"
-    --dataset "open_val=$OPEN_VAL_ZARR"
-  )
+if [[ ! -f "$ENCODER_PATH" || ! -f "$DECODER_PATH" ]]; then
+  echo "Cosmos tokenizer files are missing: encoder=$ENCODER_PATH decoder=$DECODER_PATH" >&2
+  exit 2
+fi
+
+# By default process every canonical zarr currently present in data/. This is
+# important on Chuangzhi, where the shared workspace may not contain the
+# optional HOT3D validation zarr. Use HEATMAP_CACHE_DATASETS to pin an
+# explicit comma-separated NAME=PATH list when a narrower run is intended.
+DATASET_ARGS=()
+DATASET_COUNT=0
+append_dataset() {
+  local dataset_name="$1"
+  local dataset_path="$2"
+  if [[ "${HEATMAP_CACHE_SKIP_ROBOT:-false}" == "true" && \
+        ( "$dataset_name" == "robot" || "$dataset_name" == gaze_wam_robot_* ) ]]; then
+    return 0
+  fi
+  if [[ ! -d "$dataset_path" ]]; then
+    echo "Dataset path does not exist for $dataset_name: $dataset_path" >&2
+    exit 2
+  fi
+  DATASET_ARGS+=(--dataset "${dataset_name}=${dataset_path}")
+  DATASET_COUNT=$((DATASET_COUNT + 1))
+}
+
+if [[ -n "${HEATMAP_CACHE_DATASETS:-}" ]]; then
+  IFS=',' read -r -a dataset_specs <<< "$HEATMAP_CACHE_DATASETS"
+  for dataset_spec in "${dataset_specs[@]}"; do
+    [[ -n "$dataset_spec" ]] || continue
+    if [[ "$dataset_spec" != *=* ]]; then
+      echo "HEATMAP_CACHE_DATASETS entries must use NAME=PATH: $dataset_spec" >&2
+      exit 2
+    fi
+    append_dataset "${dataset_spec%%=*}" "${dataset_spec#*=}"
+  done
+elif [[ -n "${OPEN_TRAIN_ZARR:-}${OPEN_VAL_ZARR:-}${ROBOT_ZARR:-}" ]]; then
+  # Preserve compatibility with the original three-path interface when any
+  # of its variables are explicitly supplied by a platform job.
+  [[ -n "${OPEN_TRAIN_ZARR:-}" ]] && append_dataset "open_train" "$OPEN_TRAIN_ZARR"
+  [[ -n "${OPEN_VAL_ZARR:-}" ]] && append_dataset "open_val" "$OPEN_VAL_ZARR"
+  [[ -n "${ROBOT_ZARR:-}" ]] && append_dataset "robot" "$ROBOT_ZARR"
+else
+  shopt -s nullglob
+  zarr_paths=("$ROOT"/data/*.zarr)
+  for dataset_path in "${zarr_paths[@]}"; do
+    dataset_name="$(basename "$dataset_path" .zarr)"
+    append_dataset "$dataset_name" "$dataset_path"
+  done
+  shopt -u nullglob
+fi
+
+if (( DATASET_COUNT == 0 )); then
+  echo "No canonical zarr datasets found to process." >&2
+  exit 2
 fi
 
 SAVE_DENSE_ARGS=()
@@ -155,6 +197,7 @@ world_size=$((PET_NNODES * PET_NPROC_PER_NODE))
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] launching $TASK_NAME rank=$PET_NODE_RANK/$PET_NNODES world_size=$world_size" \
   | tee -a "$NODE_LOG"
 echo "output_root=$OUTPUT_ROOT" | tee -a "$NODE_LOG"
+echo "dataset_count=$DATASET_COUNT" | tee -a "$NODE_LOG"
 echo "datasets=${DATASET_ARGS[*]}" | tee -a "$NODE_LOG"
 
 set +e
