@@ -38,6 +38,8 @@ def test_chuangzhi_heatmap_launcher_uses_fixed_4n8g_and_project_runtime():
     assert 'export TMPDIR="$SHORT_TMP_ROOT"' in text
     assert "precompute_gaze_wam_heatmap_cache.py" in text
     assert 'HEATMAP_CACHE_SAVE_DENSE:-false' in text
+    config = (root / "accelerate" / "4node-32gpu-amp.yaml").read_text()
+    assert "mixed_precision: 'no'" in config
 
 
 def test_precompute_temporal_heatmap_matches_dataset(tmp_path):
