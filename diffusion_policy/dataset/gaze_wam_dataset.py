@@ -1,4 +1,7 @@
 import copy
+import hashlib
+import json
+import pathlib
 from typing import Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
@@ -120,6 +123,105 @@ def _open_zarr_root(dataset_path: str):
         return zarr.group(store=store), store
     root = zarr.open(dataset_path, mode="r")
     return root, None
+
+
+def _array_sha256(array: np.ndarray) -> str:
+    return hashlib.sha256(np.ascontiguousarray(array).tobytes()).hexdigest()
+
+
+def _cache_dataset_name(dataset_path: str) -> str:
+    name = pathlib.Path(str(dataset_path).rstrip("/\\")).name
+    if name.endswith(".zip"):
+        name = name[:-4]
+    if name.endswith(".zarr"):
+        name = name[:-5]
+    return name
+
+
+class _HeatmapLatentCache:
+    """Read a completed rank-sharded offline Cosmos latent cache."""
+
+    def __init__(
+        self,
+        cache_root: str,
+        dataset_path: str,
+        source_rows: int,
+        episode_ends: np.ndarray,
+        token_shape: Tuple[int, int],
+        latent_scale: float,
+        latent_offset: float,
+    ) -> None:
+        root = pathlib.Path(str(cache_root)).expanduser()
+        dataset_dir = root / _cache_dataset_name(dataset_path)
+        manifest_path = dataset_dir / "manifest.json"
+        if not manifest_path.is_file():
+            raise FileNotFoundError(
+                f"Heatmap latent cache manifest not found for {_cache_dataset_name(dataset_path)!r}: "
+                f"{manifest_path}"
+            )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("status") != "complete":
+            raise ValueError(f"Heatmap latent cache is not complete: {manifest_path}")
+        if int(manifest.get("source_rows", -1)) != int(source_rows):
+            raise ValueError(
+                f"Heatmap cache source_rows mismatch for {dataset_path}: "
+                f"cache={manifest.get('source_rows')}, zarr={source_rows}."
+            )
+        episode_hash = _array_sha256(np.asarray(episode_ends, dtype=np.int64))
+        if manifest.get("source_episode_ends_sha256") != episode_hash:
+            raise ValueError(
+                f"Heatmap cache episode boundaries do not match {dataset_path}."
+            )
+        cosmos = manifest.get("cosmos") or {}
+        expected_shape = [int(token_shape[0]), int(token_shape[1])]
+        if list(cosmos.get("token_shape", [])) != expected_shape:
+            raise ValueError(
+                f"Heatmap cache token shape mismatch: cache={cosmos.get('token_shape')}, "
+                f"dataset={expected_shape}."
+            )
+        if not np.isclose(float(cosmos.get("latent_scale", np.nan)), float(latent_scale)):
+            raise ValueError("Heatmap cache latent_scale does not match the training config.")
+        if not np.isclose(float(cosmos.get("latent_offset", np.nan)), float(latent_offset)):
+            raise ValueError("Heatmap cache latent_offset does not match the training config.")
+
+        workers = manifest.get("workers") or []
+        if not workers:
+            raise ValueError(f"Heatmap cache has no worker manifests: {manifest_path}")
+        self._ranges = []
+        self._latents = []
+        self._has = []
+        for worker in sorted(workers, key=lambda item: int(item.get("rank", 0))):
+            if worker.get("status") != "complete":
+                raise ValueError(f"Heatmap cache worker is not complete: {worker}")
+            start = int(worker["global_start"])
+            end = int(worker["global_end"])
+            rank_dir = dataset_dir / f"rank_{int(worker['rank']):05d}"
+            latent_path = rank_dir / "heatmap_latent.npy"
+            has_path = rank_dir / "has_heatmap.npy"
+            latent = np.load(latent_path, mmap_mode="r", allow_pickle=False)
+            has = np.load(has_path, mmap_mode="r", allow_pickle=False)
+            if tuple(latent.shape) != (end - start, *expected_shape):
+                raise ValueError(f"Invalid heatmap cache latent shape: {latent_path} {latent.shape}")
+            if tuple(has.shape) != (end - start,):
+                raise ValueError(f"Invalid heatmap cache availability shape: {has_path} {has.shape}")
+            self._ranges.append((start, end))
+            self._latents.append(latent)
+            self._has.append(has)
+        if self._ranges[0][0] != 0 or self._ranges[-1][1] != int(source_rows):
+            raise ValueError("Heatmap cache worker ranges do not cover the complete source dataset.")
+        for previous, current in zip(self._ranges, self._ranges[1:]):
+            if previous[1] != current[0]:
+                raise ValueError("Heatmap cache worker ranges are not contiguous.")
+        self.dataset_name = _cache_dataset_name(dataset_path)
+        self.token_shape = tuple(token_shape)
+
+    def get(self, global_row: int) -> Tuple[np.ndarray, bool]:
+        row = int(global_row)
+        for (start, end), latent, has in zip(self._ranges, self._latents, self._has):
+            if start <= row < end:
+                local = row - start
+                return np.asarray(latent[local], dtype=np.float32), bool(has[local])
+        raise IndexError(f"Heatmap cache row {row} is outside all worker ranges.")
 
 
 def _resolve_data_group(root):
@@ -416,6 +518,9 @@ class _BaseGazeWamZarrDataset(BaseDataset):
         temporal_heatmap_beta: float = 10.0,
         temporal_heatmap_sigma_px: float = 6.0,
         temporal_heatmap_current_weight: float = 1.0,
+        heatmap_cache_root: str = "",
+        heatmap_latent_scale: float = 0.25,
+        heatmap_latent_offset: float = 0.0,
         seed: int = 42,
         val_ratio: float = 0.0,
     ) -> None:
@@ -518,6 +623,20 @@ class _BaseGazeWamZarrDataset(BaseDataset):
             image_size=self.image_size,
             sigma_tokens=heatmap_sigma_tokens,
         )
+        self.heatmap_cache_root = str(heatmap_cache_root or "")
+        self.heatmap_latent_scale = _validate_positive_float(
+            "heatmap_latent_scale", heatmap_latent_scale
+        )
+        try:
+            self.heatmap_latent_offset = float(heatmap_latent_offset)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"heatmap_latent_offset must be a finite float, got {heatmap_latent_offset!r}."
+            ) from exc
+        if not np.isfinite(self.heatmap_latent_offset):
+            raise ValueError(
+                f"heatmap_latent_offset must be a finite float, got {heatmap_latent_offset!r}."
+            )
 
         root, store = _open_zarr_root(dataset_path)
         self._zarr_store = store
@@ -540,6 +659,17 @@ class _BaseGazeWamZarrDataset(BaseDataset):
         if self.gaze_key not in self.data_group:
             raise KeyError(f"Canonical Gaze-WAM zarr missing required point gaze key '{self.gaze_key}'.")
         self.has_heatmap_key = self.heatmap_key is not None and self.heatmap_key in self.data_group
+        self.heatmap_cache = None
+        if self.heatmap_cache_root:
+            self.heatmap_cache = _HeatmapLatentCache(
+                cache_root=self.heatmap_cache_root,
+                dataset_path=dataset_path,
+                source_rows=int(self.episode_ends[-1]),
+                episode_ends=self.episode_ends,
+                token_shape=(self.heatmap_codec.num_tokens, self.heatmap_dim),
+                latent_scale=self.heatmap_latent_scale,
+                latent_offset=self.heatmap_latent_offset,
+            )
         self.val_mask = get_val_mask(
             n_episodes=len(self.episode_ends),
             val_ratio=self.val_ratio,
@@ -674,7 +804,17 @@ class _BaseGazeWamZarrDataset(BaseDataset):
             )
         else:
             gaze_xy = np.zeros(2, dtype=np.float32)
-        if self.has_heatmap_key:
+        heatmap_is_cached = False
+        has_heatmap_target = False
+        if self.heatmap_cache is not None:
+            heatmap_np, has_heatmap_target = self.heatmap_cache.get(current_idx)
+            heatmap = torch.from_numpy(np.ascontiguousarray(heatmap_np)).to(dtype=torch.float32)
+            heatmap_image = torch.zeros(
+                (1, self.image_size[0], self.image_size[1]), dtype=torch.float32
+            )
+            heatmap_is_cached = True
+            default_has_heatmap_image = False
+        elif self.has_heatmap_key:
             heatmap_value = self.data_group[self.heatmap_key][current_idx]
             is_dense_heatmap = _looks_like_dense_heatmap_row(
                 heatmap_value,
@@ -718,6 +858,7 @@ class _BaseGazeWamZarrDataset(BaseDataset):
                     method="gaussian_splat",
                 ).unsqueeze(0).to(dtype=torch.float32)
             default_has_heatmap_image = True
+            has_heatmap_target = bool(default_has_heatmap_image)
         else:
             heatmap = torch.zeros(
                 (self.heatmap_codec.num_tokens, self.heatmap_dim),
@@ -728,6 +869,10 @@ class _BaseGazeWamZarrDataset(BaseDataset):
                 dtype=torch.float32,
             )
             default_has_heatmap_image = False
+            # The policy can always build an online target from gaze_xy when
+            # no dense/cache target exists; keep this availability separate
+            # from the optional dense image presence flag.
+            has_heatmap_target = True
             temporal_heatmap_image = self._sample_temporal_heatmap_image(
                 current_idx=current_idx,
                 episode_start=episode_start,
@@ -745,9 +890,11 @@ class _BaseGazeWamZarrDataset(BaseDataset):
             "gaze_xy": torch.from_numpy(gaze_xy),
             "heatmap": heatmap.unsqueeze(0).to(dtype=torch.float32),
             "has_gaze_label": torch.tensor(has_gaze_label, dtype=torch.bool),
+            "heatmap_is_cached": torch.tensor(heatmap_is_cached, dtype=torch.bool),
+            "has_heatmap_target": torch.tensor(has_heatmap_target, dtype=torch.bool),
         }
         result["heatmap_image"] = heatmap_image
-        if not self.has_heatmap_key:
+        if self.heatmap_cache is not None or not self.has_heatmap_key:
             has_heatmap_image = torch.tensor(default_has_heatmap_image, dtype=torch.bool)
         else:
             has_heatmap_image = self._sample_current_presence_mask(
@@ -756,7 +903,9 @@ class _BaseGazeWamZarrDataset(BaseDataset):
             )
             if has_heatmap_image is None:
                 has_heatmap_image = torch.tensor(default_has_heatmap_image, dtype=torch.bool)
+            has_heatmap_target = bool(has_heatmap_image.item())
         result["has_heatmap_image"] = has_heatmap_image
+        result["has_heatmap_target"] = torch.tensor(has_heatmap_target, dtype=torch.bool)
         return result
 
     def _sample_current_presence_mask(self, key: str, current_idx: int) -> Optional[torch.Tensor]:
@@ -964,7 +1113,7 @@ class GazeWamOpenDataset(_BaseGazeWamZarrDataset):
                 "action": torch.zeros(self.action_horizon, self.action_dim, dtype=torch.float32),
                 "is_open": torch.tensor(True, dtype=torch.bool),
                 "has_action": torch.tensor(False, dtype=torch.bool),
-                "has_heatmap": torch.tensor(True, dtype=torch.bool),
+                "has_heatmap": result["has_heatmap_target"].clone(),
                 "use_gaze_condition": torch.tensor(False, dtype=torch.bool),
                 "is_gaze_condition_dropped": torch.tensor(True, dtype=torch.bool),
             }

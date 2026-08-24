@@ -46,9 +46,13 @@ camera_keys:
   - ${task.camera_key}
 open_camera_key_map: null
 gaze_key: gaze_xy
-# Heatmap supervision is generated online from normalized gaze_xy for the
-# DSNT/JS full-resolution objective. Keep zarr heatmap storage optional.
+# Heatmap supervision is normally read from the offline Cosmos latent cache;
+# when the cache is unset or a row is unavailable, the dataset/policy falls
+# back to the temporal gaze target and online encoding.
 heatmap_key: null
+heatmap_cache_root: ${oc.env:GAZE_WAM_HEATMAP_CACHE_ROOT,""}
+heatmap_latent_scale: 0.25
+heatmap_latent_offset: 0.0
 action_abs_key: action_abs_tcp
 tcp_pose_key: tcp_pose_abs
 gripper_key: gripper_width
@@ -75,6 +79,9 @@ robot_dataset:
   camera_keys: ${task.camera_keys}
   gaze_key: ${task.gaze_key}
   heatmap_key: ${task.heatmap_key}
+  heatmap_cache_root: ${task.heatmap_cache_root}
+  heatmap_latent_scale: ${task.heatmap_latent_scale}
+  heatmap_latent_offset: ${task.heatmap_latent_offset}
   n_obs_steps: ${task.n_obs_steps}
   n_latency_steps: ${task.n_latency_steps}
   obs_downsample_steps: ${task.obs_downsample_steps}
@@ -106,6 +113,9 @@ open_dataset:
   camera_key_map: ${task.open_camera_key_map}
   gaze_key: ${task.gaze_key}
   heatmap_key: ${task.heatmap_key}
+  heatmap_cache_root: ${task.heatmap_cache_root}
+  heatmap_latent_scale: ${task.heatmap_latent_scale}
+  heatmap_latent_offset: ${task.heatmap_latent_offset}
   n_obs_steps: ${task.n_obs_steps}
   n_latency_steps: ${task.n_latency_steps}
   obs_downsample_steps: ${task.obs_downsample_steps}

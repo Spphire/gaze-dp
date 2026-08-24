@@ -1446,7 +1446,7 @@ class GazeWamPolicy(BaseImagePolicy):
                 f"{expected_heatmap_4d} or {expected_heatmap_3d}, got {tuple(heatmap.shape)}."
             )
         self._require_floating_finite("batch['heatmap']", heatmap)
-        if self.heatmap_objective != "dsnt_js":
+        if self.heatmap_objective != "dsnt_js" and self.heatmap_spatial_decoder != "cosmos_tokenizer":
             self._require_unit_interval("batch['heatmap']", heatmap)
 
         if "heatmap_image" in batch:
@@ -1513,9 +1513,18 @@ class GazeWamPolicy(BaseImagePolicy):
                 batch_size,
             )
 
+        for key in ("has_heatmap_target", "heatmap_is_cached"):
+            if key in batch:
+                self._require_bool_vector(
+                    f"batch[{key!r}]",
+                    self._require_batch_tensor(batch, key),
+                    batch_size,
+                )
+
         is_open = batch["is_open"]
         has_action = batch["has_action"]
         has_heatmap = batch["has_heatmap"]
+        has_heatmap_target = batch.get("has_heatmap_target", has_heatmap)
         has_gaze_label = batch["has_gaze_label"]
         use_gaze_condition = batch["use_gaze_condition"]
         self._validate_loss_action_metadata(batch, batch_size)
@@ -1540,8 +1549,12 @@ class GazeWamPolicy(BaseImagePolicy):
             raise ValueError("Open-source rows must use the learned gaze mask token.")
         if torch.any((~is_open) & ~has_action):
             raise ValueError("Robot rows must have batch['has_action']=True.")
-        if torch.any(is_open & ~has_heatmap):
-            raise ValueError("Open-source rows must have batch['has_heatmap']=True.")
+        if torch.any(is_open & ~has_heatmap & has_heatmap_target):
+            raise ValueError(
+                "Open-source rows with heatmap targets must have batch['has_heatmap']=True."
+            )
+        if torch.any(has_heatmap & ~has_heatmap_target):
+            raise ValueError("batch['has_heatmap'] cannot be true without a heatmap target.")
         if torch.any((~is_open) & use_gaze_condition & has_heatmap):
             raise ValueError(
                 "Robot rows with real gaze condition must not train heatmap loss; "
@@ -1951,23 +1964,33 @@ class GazeWamPolicy(BaseImagePolicy):
         gaze_xy = batch["gaze_xy"].to(device=nactions.device, dtype=nactions.dtype)
         has_heatmap = batch["has_heatmap"].to(device=nactions.device)
         has_gaze_label = batch["has_gaze_label"].to(device=nactions.device)
+        heatmap_is_cached = batch.get(
+            "heatmap_is_cached",
+            torch.zeros(heatmap.shape[0], device=heatmap.device, dtype=torch.bool),
+        ).to(device=heatmap.device, dtype=torch.bool)
         target_gaze_mask = has_heatmap & has_gaze_label
+        cached_target_mask = target_gaze_mask & heatmap_is_cached
+        uncached_target_mask = target_gaze_mask & ~heatmap_is_cached
         target_heatmap_image = None
         if self._should_generate_cosmos_latent_target():
             target_heatmap_image = self._target_heatmap_image_from_batch_or_xy(
                 batch=batch,
                 gaze_xy=gaze_xy,
-                valid_mask=target_gaze_mask,
+                valid_mask=uncached_target_mask,
             )
-            target_heatmap = self._heatmap_image_to_training_tokens(target_heatmap_image).to(
-                device=heatmap.device,
-                dtype=heatmap.dtype,
-            )
-            heatmap = torch.where(
-                target_gaze_mask.reshape(-1, 1, 1),
-                target_heatmap,
-                heatmap,
-            )
+            if torch.any(cached_target_mask):
+                cached_target_image = self._heatmap_tokens_to_spatial_image(
+                    heatmap[cached_target_mask],
+                    "cached heatmap tokens",
+                )
+                target_heatmap_image = target_heatmap_image.clone()
+                target_heatmap_image[cached_target_mask] = cached_target_image
+            if torch.any(uncached_target_mask):
+                uncached_target = self._heatmap_image_to_training_tokens(
+                    target_heatmap_image[uncached_target_mask]
+                ).to(device=heatmap.device, dtype=heatmap.dtype)
+                heatmap = heatmap.clone()
+                heatmap[uncached_target_mask] = uncached_target
 
         action_noise = torch.randn(
             nactions.shape,
@@ -2233,6 +2256,8 @@ class GazeWamPolicy(BaseImagePolicy):
             "action_loss_mask_count": distributed_mask_count(action_loss_mask),
             "heatmap_loss_mask_count": distributed_mask_count(heatmap_loss_mask),
             "heatmap_xy_loss_mask_count": distributed_mask_count(heatmap_xy_loss_mask),
+            "heatmap_cached_target_count": distributed_mask_count(cached_target_mask),
+            "heatmap_uncached_target_count": distributed_mask_count(uncached_target_mask),
         }
         if return_per_sample:
             result.update(
@@ -2250,6 +2275,8 @@ class GazeWamPolicy(BaseImagePolicy):
                     "action_loss_mask": action_loss_mask.detach(),
                     "heatmap_loss_mask": heatmap_loss_mask.detach(),
                     "heatmap_xy_loss_mask": heatmap_xy_loss_mask.detach(),
+                    "heatmap_cached_target_mask": cached_target_mask.detach(),
+                    "heatmap_uncached_target_mask": uncached_target_mask.detach(),
                 }
             )
         return result

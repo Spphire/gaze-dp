@@ -61,6 +61,26 @@ def _optional_presence_mask(
     return _require_bool_mask(f"{source_name}[{mask_key!r}]", mask)
 
 
+def _optional_bool_field(
+    source_name: str,
+    batch: Dict[str, torch.Tensor],
+    key: str,
+    batch_size: int,
+    device: torch.device,
+    default_value: bool,
+) -> torch.Tensor:
+    value = batch.get(key)
+    if value is None:
+        return torch.full((batch_size,), bool(default_value), device=device, dtype=torch.bool)
+    if not torch.is_tensor(value):
+        raise TypeError(
+            f"{source_name}[{key!r}] must be a torch.Tensor, got {type(value).__name__}."
+        )
+    value = value.to(device=device)
+    _require_batch_vector(f"{source_name}[{key!r}]", value, batch_size)
+    return _require_bool_mask(f"{source_name}[{key!r}]", value)
+
+
 def _source_gaze_label_mask(
     source_name: str,
     batch: Dict[str, torch.Tensor],
@@ -167,8 +187,8 @@ def build_gaze_wam_mixed_batch(
             raise KeyError("open_batch must contain gaze_xy labels.")
         if "heatmap" not in open_batch:
             raise KeyError(
-                "open_batch must contain heatmap placeholders; dsnt_js supervision "
-                "is generated online from gaze_xy."
+                "open_batch must contain heatmap placeholders; uncached heatmap "
+                "targets are generated online from gaze_xy."
             )
 
         open_size = _batch_size("open_batch['gaze_xy']", open_batch["gaze_xy"])
@@ -190,14 +210,24 @@ def build_gaze_wam_mixed_batch(
             open_batch["gaze_xy"],
             open_has_gaze_label,
         )
+        open_has_heatmap_target = _optional_bool_field(
+            "open_batch", open_batch, "has_heatmap_target", open_size, device, True
+        )
+        open_heatmap_is_cached = _optional_bool_field(
+            "open_batch", open_batch, "heatmap_is_cached", open_size, device, False
+        )
         batch = {
             "obs": open_batch["obs"],
             "action": torch.zeros_like(open_action),
-            "heatmap": open_batch["heatmap"],
+            "heatmap": _zero_rows_where_mask_false(
+                "open_batch['heatmap']", open_batch["heatmap"], open_has_heatmap_target
+            ),
             "gaze_xy": open_gaze_xy,
             "is_open": torch.ones(open_size, device=device, dtype=torch.bool),
             "has_action": torch.zeros(open_size, device=device, dtype=torch.bool),
-            "has_heatmap": torch.ones(open_size, device=device, dtype=torch.bool),
+            "has_heatmap": open_has_heatmap_target,
+            "has_heatmap_target": open_has_heatmap_target,
+            "heatmap_is_cached": open_heatmap_is_cached,
             "has_gaze_label": open_has_gaze_label,
             "use_gaze_condition": torch.zeros(open_size, device=device, dtype=torch.bool),
             "is_gaze_condition_dropped": torch.ones(
@@ -245,8 +275,8 @@ def build_gaze_wam_mixed_batch(
         raise KeyError("robot_batch must contain gaze_xy labels.")
     if "heatmap" not in robot_batch:
         raise KeyError(
-            "robot_batch must contain heatmap placeholders; dsnt_js supervision "
-            "is generated online from gaze_xy when routed."
+            "robot_batch must contain heatmap placeholders; uncached heatmap "
+            "targets are generated online from gaze_xy when routed."
         )
 
     robot_action = robot_batch["action"]
@@ -275,8 +305,14 @@ def build_gaze_wam_mixed_batch(
     )
     robot_uses_gaze_condition = (~robot_dropout) & robot_has_gaze_label
     robot_gaze_condition_dropped = ~robot_uses_gaze_condition
+    robot_has_heatmap_target = _optional_bool_field(
+        "robot_batch", robot_batch, "has_heatmap_target", robot_size, device, True
+    )
+    robot_heatmap_is_cached = _optional_bool_field(
+        "robot_batch", robot_batch, "heatmap_is_cached", robot_size, device, False
+    )
     robot_has_heatmap = (
-        robot_gaze_condition_dropped
+        robot_gaze_condition_dropped & robot_has_heatmap_target
         if robot_heatmap_on_gaze_dropout
         else torch.zeros_like(robot_gaze_condition_dropped)
     )
@@ -293,6 +329,8 @@ def build_gaze_wam_mixed_batch(
             "is_open": torch.zeros(robot_size, device=device, dtype=torch.bool),
             "has_action": torch.ones(robot_size, device=device, dtype=torch.bool),
             "has_heatmap": robot_has_heatmap,
+            "has_heatmap_target": robot_has_heatmap_target,
+            "heatmap_is_cached": robot_heatmap_is_cached,
             "has_gaze_label": robot_has_gaze_label,
             "use_gaze_condition": robot_uses_gaze_condition,
             "is_gaze_condition_dropped": robot_gaze_condition_dropped,
@@ -326,8 +364,8 @@ def build_gaze_wam_mixed_batch(
         raise KeyError("open_batch must contain gaze_xy labels.")
     if "heatmap" not in open_batch:
         raise KeyError(
-            "open_batch must contain heatmap placeholders; dsnt_js supervision "
-            "is generated online from gaze_xy."
+            "open_batch must contain heatmap placeholders; uncached heatmap "
+            "targets are generated online from gaze_xy."
         )
 
     open_size = _batch_size("open_batch['gaze_xy']", open_batch["gaze_xy"])
@@ -356,6 +394,12 @@ def build_gaze_wam_mixed_batch(
         "open_batch['gaze_xy']",
         open_batch["gaze_xy"].to(robot_batch["gaze_xy"].device),
         open_has_gaze_label,
+    )
+    open_has_heatmap_target = _optional_bool_field(
+        "open_batch", open_batch, "has_heatmap_target", open_size, device, True
+    )
+    open_heatmap_is_cached = _optional_bool_field(
+        "open_batch", open_batch, "heatmap_is_cached", open_size, device, False
     )
     open_action = open_batch.get("action")
     if open_action is not None:
@@ -402,7 +446,13 @@ def build_gaze_wam_mixed_batch(
         dim=0,
     )
     has_action = ~is_open
-    has_heatmap = torch.cat([robot_has_heatmap, torch.ones_like(open_dropout)], dim=0)
+    has_heatmap = torch.cat([robot_has_heatmap, open_has_heatmap_target], dim=0)
+    has_heatmap_target = torch.cat(
+        [robot_has_heatmap_target, open_has_heatmap_target], dim=0
+    )
+    heatmap_is_cached = torch.cat(
+        [robot_heatmap_is_cached, open_heatmap_is_cached], dim=0
+    )
     heatmap = _zero_rows_where_mask_false("mixed_batch['heatmap']", heatmap, has_heatmap)
     has_gaze_label = torch.cat([robot_has_gaze_label, open_has_gaze_label], dim=0)
     use_gaze_condition = torch.cat(
@@ -422,6 +472,8 @@ def build_gaze_wam_mixed_batch(
         "is_open": is_open,
         "has_action": has_action,
         "has_heatmap": has_heatmap,
+        "has_heatmap_target": has_heatmap_target,
+        "heatmap_is_cached": heatmap_is_cached,
         "has_gaze_label": has_gaze_label,
         "use_gaze_condition": use_gaze_condition,
         "is_gaze_condition_dropped": is_gaze_condition_dropped,
