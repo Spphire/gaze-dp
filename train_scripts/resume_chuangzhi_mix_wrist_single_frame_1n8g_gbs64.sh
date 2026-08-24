@@ -8,6 +8,9 @@ export ACCELERATE_CONFIG="accelerate/8gpu-amp.yaml"
 export EXPECTED_NNODES=1
 export EXPECTED_NPROC_PER_NODE=8
 export RESUME=true
+# This single-node resume is the cache-read smoke test.  Override the path
+# when the cache was staged under a different project directory.
+export GAZE_WAM_HEATMAP_CACHE_ROOT="${GAZE_WAM_HEATMAP_CACHE_ROOT:-$ROOT/data/heatmap_cache/job-1b9f80a1-bb74-4e62-99a7-76bfeb242898-worker-0_23456}"
 
 # Reuse the stopped run so the workspace can find checkpoints/latest.ckpt.
 DEFAULT_RESUME_OUTPUT_DIR="$ROOT/data/outputs/chuangzhi/$TASK_NAME/job-0ee2b0f1-13e4-4b28-837f-726f4afef1dc-worker-0_23456"
