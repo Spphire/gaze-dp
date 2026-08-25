@@ -12,7 +12,7 @@ def load_cfg(name):
         return compose(config_name=name)
 
 
-def assert_temporal_mixed_nll(cfg):
+def assert_temporal_latent_only(cfg):
     assert cfg.task.heatmap_key is None
     assert cfg.task.temporal_heatmap_mode == "bidirectional"
     assert cfg.task.temporal_heatmap_window_radius == 30
@@ -22,18 +22,18 @@ def assert_temporal_mixed_nll(cfg):
     assert cfg.policy.heatmap_objective == "diffusion"
     assert cfg.policy.heatmap_loss_weight == 1.0
     assert cfg.policy.heatmap_token_kl_loss_weight == 0.0
-    assert cfg.policy.heatmap_diffusion_final_loss_enabled is True
-    assert cfg.policy.heatmap_final_loss_timestep_weighting == "alpha_cumprod"
+    assert cfg.policy.heatmap_diffusion_final_loss_enabled is False
+    assert cfg.policy.heatmap_final_loss_timestep_weighting == "none"
     assert cfg.policy.heatmap_xy_loss_weight == 0.0
-    assert cfg.policy.heatmap_point_nll_loss_weight == 0.05
-    assert cfg.policy.heatmap_js_loss_weight == 0.10
+    assert cfg.policy.heatmap_point_nll_loss_weight == 0.0
+    assert cfg.policy.heatmap_js_loss_weight == 0.0
     assert all(len(str(tag)) <= 64 for tag in cfg.logging.tags)
 
 
-def test_chuangzhi_open_pretrain_is_4n8g_gbs512_with_temporal_mixed_nll():
+def test_chuangzhi_open_pretrain_is_4n8g_gbs512_with_temporal_latent_only():
     cfg = load_cfg("train_gaze_wam_chuangzhi_open_pretrain_4n8g_gbs512")
 
-    assert_temporal_mixed_nll(cfg)
+    assert_temporal_latent_only(cfg)
     assert cfg.task.n_obs_steps == 1
     assert cfg.task.gaze_key == "gaze_xy"
     assert cfg.data_mixing.total_batch_size_per_process == 16
@@ -53,7 +53,7 @@ def test_chuangzhi_open_pretrain_is_4n8g_gbs512_with_temporal_mixed_nll():
 def test_chuangzhi_dual_view_mix_is_single_frame_shared_vit_gbs64():
     cfg = load_cfg("train_gaze_wam_chuangzhi_mix_dual_single_frame_1n8g_gbs64")
 
-    assert_temporal_mixed_nll(cfg)
+    assert_temporal_latent_only(cfg)
     assert cfg.task.n_obs_steps == 1
     assert list(cfg.task.camera_keys) == ["camera0_rgb", "camera1_rgb"]
     assert cfg.policy.obs_encoder.share_rgb_model is True
@@ -68,7 +68,7 @@ def test_chuangzhi_dual_view_mix_is_single_frame_shared_vit_gbs64():
 def test_chuangzhi_wrist_mix_is_single_frame_single_view_gbs64():
     cfg = load_cfg("train_gaze_wam_chuangzhi_mix_wrist_single_frame_1n8g_gbs64")
 
-    assert_temporal_mixed_nll(cfg)
+    assert_temporal_latent_only(cfg)
     assert cfg.task.n_obs_steps == 1
     assert cfg.task.camera_key == "camera0_rgb"
     assert list(cfg.task.camera_keys) == ["camera0_rgb"]
@@ -112,6 +112,32 @@ def test_chuangzhi_resume_wrappers_force_resume_and_validate_latest_checkpoint()
         if "open_pretrain" in wrapper:
             assert "accelerate_state_step_*" in text
         assert 'launch_gaze_wam_chuangzhi_pet.sh' in text
+
+
+def test_dual_and_open_wrappers_require_offline_heatmap_latent_cache():
+    wrappers = {
+        "launch_chuangzhi_open_pretrain_4n8g_gbs512.sh": (
+            "hot3d_open_train",
+        ),
+        "resume_chuangzhi_open_pretrain_4n8g_gbs512.sh": (
+            "hot3d_open_train",
+        ),
+        "launch_chuangzhi_mix_dual_single_frame_1n8g_gbs64.sh": (
+            "hot3d_open_train",
+            "gaze_wam_robot_20260814_from_162120_dual_view",
+        ),
+        "resume_chuangzhi_mix_dual_single_frame_1n8g_gbs64.sh": (
+            "hot3d_open_train",
+            "gaze_wam_robot_20260814_from_162120_dual_view",
+        ),
+    }
+    for wrapper, datasets in wrappers.items():
+        text = (ROOT / "train_scripts" / wrapper).read_text()
+        assert "export GAZE_WAM_HEATMAP_CACHE_ROOT=" in text
+        assert "job-1b9f80a1-bb74-4e62-99a7-76bfeb242898-worker-0_23456" in text
+        assert "Required heatmap latent cache manifest is missing or empty" in text
+        for dataset in datasets:
+            assert dataset in text
 
 
 def test_chuangzhi_pet_launcher_maps_platform_topology_and_writes_node_logs():

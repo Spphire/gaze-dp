@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader, Subset
 
 from diffusion_policy.common.pytorch_util import dict_apply
 from diffusion_policy.scripts.eval_gaze_wam_metrics import load_policy_for_eval
+from diffusion_policy.model.gaze_wam.loss import normalize_spatial_distribution
 
 
 def _imwrite_unicode(path: pathlib.Path, image: np.ndarray) -> None:
@@ -247,6 +248,35 @@ def preview_gaze_wam_checkpoint(
             gaze_xy=batch["gaze_xy"].to(device=policy.device, dtype=policy.dtype),
             valid_mask=target_mask,
         )
+        heatmap_is_cached = batch.get(
+            "heatmap_is_cached",
+            torch.zeros_like(target_mask),
+        ).to(device=policy.device, dtype=torch.bool)
+        cached_target_mask = target_mask & heatmap_is_cached
+        if torch.any(cached_target_mask):
+            cached_heatmap = batch["heatmap"].to(
+                device=policy.device,
+                dtype=policy.dtype,
+            )
+            if cached_heatmap.ndim == 4:
+                if cached_heatmap.shape[1] != 1:
+                    raise ValueError(
+                        "Cached preview heatmap must have horizon 1, got "
+                        f"{tuple(cached_heatmap.shape)}."
+                    )
+                cached_heatmap = cached_heatmap[:, 0]
+            decoded_cached_target = policy._heatmap_tokens_to_spatial_image(
+                cached_heatmap[cached_target_mask],
+                "cached preview heatmap tokens",
+            )
+            decoded_cached_target = normalize_spatial_distribution(
+                decoded_cached_target
+            )
+            target_image = target_image.clone()
+            target_image[cached_target_mask] = decoded_cached_target.to(
+                device=target_image.device,
+                dtype=target_image.dtype,
+            )
 
     pred_images = pred["heatmap_image"].detach().float().cpu().numpy()
     target_images = target_image.detach().float().cpu().numpy()
@@ -296,6 +326,13 @@ def preview_gaze_wam_checkpoint(
                 "split": split,
                 "pred_heatmap_shape": [int(v) for v in pred_image.shape],
                 "target_heatmap_shape": [int(v) for v in target.shape],
+                "pred_heatmap_sum": float(pred_image.sum()),
+                "target_heatmap_sum": float(target.sum()),
+                "target_source": (
+                    "cached_latent_decode"
+                    if bool(cached_target_mask[sample_idx].item())
+                    else "online_temporal_or_xy"
+                ),
                 "paths": {key: str(value) for key, value in paths.items()},
             }
         )
@@ -390,6 +427,9 @@ def preview_gaze_wam_checkpoint(
                 "gaze_xy": first["gaze_xy"],
                 "pred_heatmap_shape": first["pred_heatmap_shape"],
                 "target_heatmap_shape": first["target_heatmap_shape"],
+                "pred_heatmap_sum": first["pred_heatmap_sum"],
+                "target_heatmap_sum": first["target_heatmap_sum"],
+                "target_source": first["target_source"],
                 "paths": {
                     **{key: str(value) for key, value in (legacy_paths or {}).items()},
                     "summary": str(out_dir / "summary.json"),

@@ -21,11 +21,13 @@ policy:
   heatmap_objective: diffusion
   heatmap_loss_weight: 1.0
   heatmap_token_kl_loss_weight: 0.0
-  heatmap_diffusion_final_loss_enabled: true
-  heatmap_final_loss_timestep_weighting: alpha_cumprod
+  # Latent-only ablation: the cached temporal dense target is supervised in
+  # diffusion latent space; do not add decoded dense/NLL/DSNT auxiliary loss.
+  heatmap_diffusion_final_loss_enabled: false
+  heatmap_final_loss_timestep_weighting: none
   heatmap_xy_loss_weight: 0.0
-  heatmap_point_nll_loss_weight: 0.05
-  heatmap_js_loss_weight: 0.10
+  heatmap_point_nll_loss_weight: 0.0
+  heatmap_js_loss_weight: 0.0
 
 data_mixing:
   total_batch_size_per_process: 16

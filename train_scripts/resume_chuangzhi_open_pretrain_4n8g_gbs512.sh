@@ -8,6 +8,13 @@ export ACCELERATE_CONFIG="accelerate/4node-32gpu-deepspeed-bf16.yaml"
 export EXPECTED_NNODES=4
 export EXPECTED_NPROC_PER_NODE=8
 export RESUME=true
+export GAZE_WAM_HEATMAP_CACHE_ROOT="${GAZE_WAM_HEATMAP_CACHE_ROOT:-$ROOT/data/heatmap_cache/job-1b9f80a1-bb74-4e62-99a7-76bfeb242898-worker-0_23456}"
+
+manifest="$GAZE_WAM_HEATMAP_CACHE_ROOT/hot3d_open_train/manifest.json"
+if [[ ! -s "$manifest" ]]; then
+  echo "Required heatmap latent cache manifest is missing or empty: $manifest" >&2
+  exit 2
+fi
 
 # Reuse the stopped four-node run so the workspace can find latest.ckpt and
 # the matching DeepSpeed-native state directory.

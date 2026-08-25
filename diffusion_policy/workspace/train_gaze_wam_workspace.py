@@ -73,7 +73,10 @@ from diffusion_policy.model.common.normalizer import (
 )
 from diffusion_policy.model.common.lr_scheduler import get_scheduler
 from diffusion_policy.model.diffusion.ema_model import EMAModel
-from diffusion_policy.model.gaze_wam.loss import distributed_mask_count
+from diffusion_policy.model.gaze_wam.loss import (
+    distributed_mask_count,
+    normalize_spatial_distribution,
+)
 from diffusion_policy.model.gaze_wam.routing import loss_routing_summary
 from diffusion_policy.policy.gaze_wam_policy import GazeWamPolicy
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
@@ -2009,6 +2012,35 @@ def _write_heatmap_preview(
         gaze_xy=preview_batch["gaze_xy"].to(device=policy.device, dtype=policy.dtype),
         valid_mask=target_mask,
     )
+    heatmap_is_cached = preview_batch.get(
+        "heatmap_is_cached",
+        torch.zeros_like(target_mask),
+    ).to(device=policy.device, dtype=torch.bool)
+    cached_target_mask = target_mask & heatmap_is_cached
+    if torch.any(cached_target_mask):
+        cached_heatmap = preview_batch["heatmap"].to(
+            device=policy.device,
+            dtype=policy.dtype,
+        )
+        if cached_heatmap.ndim == 4:
+            if cached_heatmap.shape[1] != 1:
+                raise ValueError(
+                    "Cached preview heatmap must have horizon 1, got "
+                    f"{tuple(cached_heatmap.shape)}."
+                )
+            cached_heatmap = cached_heatmap[:, 0]
+        decoded_cached_target = policy._heatmap_tokens_to_spatial_image(
+            cached_heatmap[cached_target_mask],
+            "cached preview heatmap tokens",
+        )
+        # Match the target normalization used by spatial JS loss. The decoder
+        # output is a dense image, not a probability distribution by itself.
+        decoded_cached_target = normalize_spatial_distribution(decoded_cached_target)
+        target_image = target_image.clone()
+        target_image[cached_target_mask] = decoded_cached_target.to(
+            device=target_image.device,
+            dtype=target_image.dtype,
+        )
     target_tokens = policy._heatmap_image_to_training_tokens(
         target_image,
     )
@@ -2146,6 +2178,13 @@ def _write_heatmap_preview(
                 "is_open": bool(sample_batch["is_open"][0].item()),
                 "pred_heatmap_shape": [int(v) for v in pred_image.shape],
                 "target_heatmap_shape": [int(v) for v in one_target_image.shape],
+                "pred_heatmap_sum": float(pred_image.sum()),
+                "target_heatmap_sum": float(one_target_image.sum()),
+                "target_source": (
+                    "cached_latent_decode"
+                    if bool(cached_target_mask[sample_idx].item())
+                    else "online_temporal_or_xy"
+                ),
                 "pred_token_argmax": int(
                     pred["heatmap_tokens"][sample_idx].reshape(-1).argmax().item()
                 ),
@@ -2199,6 +2238,9 @@ def _write_heatmap_preview(
                 "use_gaze_condition": first["use_gaze_condition"],
                 "pred_heatmap_shape": first["pred_heatmap_shape"],
                 "target_heatmap_shape": first["target_heatmap_shape"],
+                "pred_heatmap_sum": first["pred_heatmap_sum"],
+                "target_heatmap_sum": first["target_heatmap_sum"],
+                "target_source": first["target_source"],
                 "pred_token_argmax": first["pred_token_argmax"],
                 "target_token_argmax": first["target_token_argmax"],
                 "paths": {
