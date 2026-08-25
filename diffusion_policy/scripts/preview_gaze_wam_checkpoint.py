@@ -229,6 +229,9 @@ def preview_gaze_wam_checkpoint(
         "has_gaze_label",
         torch.ones(batch["gaze_xy"].shape[0], device=device_obj, dtype=torch.bool),
     )
+    obs["has_gaze_condition"] = batch.get(
+        "has_gaze_condition", obs["has_gaze_label"]
+    )
     obs["use_gaze_condition"] = torch.full(
         (batch["gaze_xy"].shape[0],),
         bool(use_gaze_condition),

@@ -45,6 +45,7 @@ OPTIONAL_PRESENCE_MASK_KEYS = (
     "has_action_abs",
     "has_action_base_abs",
     "has_heatmap_image",
+    "has_gaze_condition",
     "has_gaze_label",
 )
 
@@ -210,6 +211,9 @@ def _normalize_gaze(
     image_hw: Tuple[int, int],
     gaze_is_normalized: bool,
     gaze_bounds_policy: str = "error",
+    has_gaze_condition: Optional[np.ndarray] = None,
+    has_gaze_label: Optional[np.ndarray] = None,
+    require_zero_inactive: bool = True,
 ) -> np.ndarray:
     _ensure_canonicalizer_runtime()
     gaze = np.asarray(gaze, dtype=np.float32)
@@ -218,8 +222,33 @@ def _normalize_gaze(
     if not gaze_is_normalized:
         image_h, image_w = image_hw
         gaze = gaze / np.asarray([image_w, image_h], dtype=np.float32)
+    n_steps = int(gaze.shape[0])
+    if has_gaze_label is None:
+        has_gaze_label = np.ones((n_steps,), dtype=np.bool_)
+    else:
+        has_gaze_label = np.asarray(has_gaze_label).reshape(-1).astype(np.bool_)
+    if has_gaze_condition is None:
+        has_gaze_condition = has_gaze_label
+    else:
+        has_gaze_condition = np.asarray(has_gaze_condition).reshape(-1).astype(np.bool_)
+    if has_gaze_label.shape != (n_steps,) or has_gaze_condition.shape != (n_steps,):
+        raise ValueError("Gaze condition/label masks must have shape [N].")
+    if np.any(has_gaze_label & ~has_gaze_condition):
+        raise ValueError("has_gaze_label cannot be true where has_gaze_condition is false.")
+    if not np.all(np.isfinite(gaze)):
+        raise ValueError("gaze_xy must contain only finite values.")
+    if np.any(gaze[~has_gaze_condition] != 0):
+        if require_zero_inactive:
+            raise ValueError(
+                "gaze_xy rows without a gaze condition must be zero placeholders."
+            )
+        gaze = gaze.copy()
+        gaze[~has_gaze_condition] = 0.0
     checked = []
     for idx, point in enumerate(gaze):
+        if not has_gaze_label[idx]:
+            checked.append(point)
+            continue
         normalized = check_gaze_bounds(point, policy=gaze_bounds_policy, row_idx=idx)
         if normalized is None:
             raise ValueError("Robot canonicalization does not support dropping gaze rows.")
@@ -335,11 +364,25 @@ def canonicalize_robot_gaze_wam_zarr(
                 "Input robot zarr must contain a point gaze key so canonical zarr can write "
                 f"normalized {output_gaze_key!r}. Requested gaze_key={gaze_key!r}."
             )
+        n_steps = int(image_array.shape[0])
+        input_has_gaze_label = (
+            np.asarray(input_data["has_gaze_label"][:]).reshape(-1).astype(np.bool_)
+            if "has_gaze_label" in input_data
+            else np.ones((n_steps,), dtype=np.bool_)
+        )
+        input_has_gaze_condition = (
+            np.asarray(input_data["has_gaze_condition"][:]).reshape(-1).astype(np.bool_)
+            if "has_gaze_condition" in input_data
+            else input_has_gaze_label
+        )
         gaze = _normalize_gaze(
             input_data[gaze_key][:],
             image_hw=gaze_image_hw,
             gaze_is_normalized=gaze_is_normalized,
             gaze_bounds_policy=gaze_bounds_policy,
+            has_gaze_condition=input_has_gaze_condition,
+            has_gaze_label=input_has_gaze_label,
+            require_zero_inactive="has_gaze_condition" in input_data,
         )
         data.array(output_gaze_key, gaze, shape=gaze.shape, dtype=gaze.dtype)
         shapes[output_gaze_key] = _array_shape(gaze)
@@ -356,6 +399,7 @@ def canonicalize_robot_gaze_wam_zarr(
                 sigma_px=point_heatmap_sigma_px,
                 window_size=point_heatmap_window,
                 episode_ends=episode_ends,
+                valid_mask=input_has_gaze_label,
             )
             data.array(
                 output_heatmap_key,
@@ -388,10 +432,17 @@ def canonicalize_robot_gaze_wam_zarr(
                 "output_key": dst_key,
             }
         copied_presence_masks = _copy_optional_presence_masks(input_data, data)
-        n_steps = int(image_array.shape[0])
-        for mask_key in ("has_gaze_label", "has_heatmap_image"):
+        for mask_key in (
+            "has_gaze_condition",
+            "has_gaze_label",
+            "has_heatmap_image",
+        ):
             if mask_key not in data:
-                mask = np.ones((n_steps,), dtype=np.bool_)
+                mask = (
+                    input_has_gaze_label.copy()
+                    if mask_key == "has_gaze_condition"
+                    else np.ones((n_steps,), dtype=np.bool_)
+                )
                 data.array(mask_key, mask, shape=mask.shape, dtype=mask.dtype)
                 copied_presence_masks[mask_key] = _array_shape(mask)
         shapes.update(copied_presence_masks)

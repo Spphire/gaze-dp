@@ -128,6 +128,9 @@ def _slice_batch(batch, mask: torch.Tensor):
 def _obs_from_batch(batch, include_action_base: bool = False) -> Dict[str, torch.Tensor]:
     obs = dict(batch["obs"])
     obs["gaze_xy"] = batch["gaze_xy"]
+    obs["has_gaze_condition"] = batch.get(
+        "has_gaze_condition", batch["has_gaze_label"]
+    )
     obs["has_gaze_label"] = batch["has_gaze_label"]
     obs["use_gaze_condition"] = batch["use_gaze_condition"]
     if include_action_base and "action_base_abs" in batch:
@@ -350,6 +353,11 @@ def _evaluate_gaze_wam_dataset_impl(
             batch["has_gaze_label"],
             batch_size_actual,
         )
+        has_gaze_condition = _require_bool_vector(
+            "batch['has_gaze_condition']",
+            batch.get("has_gaze_condition", has_gaze_label),
+            batch_size_actual,
+        )
         use_gaze_condition = _require_bool_vector(
             "batch['use_gaze_condition']",
             batch["use_gaze_condition"],
@@ -364,7 +372,7 @@ def _evaluate_gaze_wam_dataset_impl(
             has_action,
         )
         has_heatmap_image = _optional_presence_mask(batch, "heatmap_image", row_mask)
-        gdr_mask = has_action & has_gaze_label & use_gaze_condition
+        gdr_mask = has_action & has_gaze_condition & use_gaze_condition
 
         coverage_counts["action_supervision_count"] += _mask_count(has_action)
         coverage_counts["action_abs_supervision_count"] += _mask_count(has_action_abs)

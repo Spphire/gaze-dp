@@ -457,12 +457,18 @@ def _normalize_gaze_xy(
     gaze_xy: np.ndarray,
     source_image_size: Tuple[int, int],
     gaze_is_normalized: bool,
+    require_in_frame: bool = True,
 ) -> np.ndarray:
     gaze_xy = np.asarray(gaze_xy, dtype=np.float32)
     if not gaze_is_normalized:
         image_h, image_w = source_image_size
         gaze_xy = gaze_xy / np.asarray([image_w, image_h], dtype=np.float32)
-    return check_gaze_bounds(gaze_xy.reshape(-1)[:2], policy="error")
+    gaze_xy = gaze_xy.reshape(-1)[:2]
+    if gaze_xy.shape != (2,) or not np.all(np.isfinite(gaze_xy)):
+        raise ValueError("gaze_xy must contain two finite coordinates.")
+    if require_in_frame:
+        return check_gaze_bounds(gaze_xy, policy="error")
+    return gaze_xy.astype(np.float32, copy=False)
 
 
 def _validate_image_resize_mode(image_resize_mode: str) -> str:
@@ -795,12 +801,25 @@ class _BaseGazeWamZarrDataset(BaseDataset):
         has_gaze_label = True
         if has_gaze_label_mask is not None:
             has_gaze_label = bool(has_gaze_label_mask.item())
+        has_gaze_condition_mask = self._sample_current_presence_mask(
+            "has_gaze_condition",
+            current_idx=current_idx,
+        )
+        has_gaze_condition = has_gaze_label
+        if has_gaze_condition_mask is not None:
+            has_gaze_condition = bool(has_gaze_condition_mask.item())
+        if has_gaze_label and not has_gaze_condition:
+            raise ValueError(
+                f"zarr row {int(current_idx)} has_gaze_label=True but "
+                "has_gaze_condition=False."
+            )
 
-        if has_gaze_label:
+        if has_gaze_condition:
             gaze_xy = _normalize_gaze_xy(
                 self.data_group[self.gaze_key][current_idx],
                 source_image_size=source_image_size,
                 gaze_is_normalized=self.gaze_is_normalized,
+                require_in_frame=has_gaze_label,
             )
         else:
             gaze_xy = np.zeros(2, dtype=np.float32)
@@ -889,6 +908,7 @@ class _BaseGazeWamZarrDataset(BaseDataset):
             },
             "gaze_xy": torch.from_numpy(gaze_xy),
             "heatmap": heatmap.unsqueeze(0).to(dtype=torch.float32),
+            "has_gaze_condition": torch.tensor(has_gaze_condition, dtype=torch.bool),
             "has_gaze_label": torch.tensor(has_gaze_label, dtype=torch.bool),
             "heatmap_is_cached": torch.tensor(heatmap_is_cached, dtype=torch.bool),
             "has_heatmap_target": torch.tensor(has_heatmap_target, dtype=torch.bool),
@@ -1022,8 +1042,8 @@ class GazeWamRobotDataset(_BaseGazeWamZarrDataset):
                 "is_open": torch.tensor(False, dtype=torch.bool),
                 "has_action": torch.tensor(True, dtype=torch.bool),
                 "has_heatmap": torch.tensor(False, dtype=torch.bool),
-                "use_gaze_condition": result["has_gaze_label"].clone(),
-                "is_gaze_condition_dropped": (~result["has_gaze_label"]).clone(),
+                "use_gaze_condition": result["has_gaze_condition"].clone(),
+                "is_gaze_condition_dropped": (~result["has_gaze_condition"]).clone(),
             }
         )
         has_action_abs = self._sample_future_presence_mask(

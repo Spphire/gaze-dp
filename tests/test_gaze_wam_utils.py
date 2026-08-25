@@ -626,7 +626,12 @@ def _write_mixed_point_dense_gaze_zarr(path: Path):
     heatmap = np.zeros((6, 16, 16), dtype=np.float32)
     heatmap[:, 4:12, 2:6] = 1.0
     has_gaze_label = np.asarray([1, 0, 1, 1, 1, 1], dtype=np.uint8)
+    has_gaze_condition = np.ones((6,), dtype=np.uint8)
+    gaze_xy = np.asarray(data["gaze_xy"][:], dtype=np.float32)
+    gaze_xy[1] = np.asarray([1.25, 0.4], dtype=np.float32)
     _replace_zarr_array(data, "gaze_heatmap", heatmap)
+    _replace_zarr_array(data, "gaze_xy", gaze_xy)
+    _replace_zarr_array(data, "has_gaze_condition", has_gaze_condition)
     _replace_zarr_array(data, "has_gaze_label", has_gaze_label)
     return path
 
@@ -997,7 +1002,6 @@ def test_gaussian_spatial_encoder_and_mask_token():
         ([[0.5, 0.5]], "gaze_xy"),
         (torch.tensor([[0, 1]], dtype=torch.int64), "floating point"),
         (torch.tensor([[float("nan"), 0.5]], dtype=torch.float32), "finite values"),
-        (torch.tensor([[1.1, 0.5]], dtype=torch.float32), "normalized to [0, 1]"),
     ]
     for bad_point, expected in invalid_points:
         try:
@@ -1029,12 +1033,11 @@ def test_gaussian_spatial_encoder_and_mask_token():
     else:
         raise AssertionError("Expected non-bool encoder has_gaze_label to fail.")
 
-    try:
-        encoder(torch.tensor([[1.2, 0.5]], dtype=torch.float32))
-    except ValueError as exc:
-        assert "gaze_xy must be normalized to [0, 1]" in str(exc)
-    else:
-        raise AssertionError("Expected encoder out-of-range gaze input to fail.")
+    outside_basis = spatial(torch.tensor([[1.2, -0.1]], dtype=torch.float32))
+    extreme_basis = spatial(torch.tensor([[100.0, -100.0]], dtype=torch.float32))
+    clamped_basis = spatial(torch.tensor([[1.5, -0.5]], dtype=torch.float32))
+    assert torch.isfinite(outside_basis).all()
+    assert torch.allclose(extreme_basis, clamped_basis)
 
     try:
         encoder(xy, use_gaze_condition=torch.ones(2, 1, dtype=torch.bool))
@@ -1047,6 +1050,7 @@ def test_gaussian_spatial_encoder_and_mask_token():
         encoder(
             xy,
             use_gaze_condition=torch.tensor([True, False]),
+            has_gaze_condition=torch.tensor([False, True]),
             has_gaze_label=torch.tensor([False, True]),
         )
     except ValueError as exc:
@@ -4187,7 +4191,7 @@ def test_gaze_wam_policy_rejects_invalid_loss_batch_contract(tmp_path):
                 b["has_gaze_label"].__setitem__(3, False),
                 b["gaze_xy"].__setitem__((3, 0), 0.5),
             ),
-            "batch['gaze_xy'] rows with has_gaze_label=False must be zero placeholders",
+            "batch['gaze_xy'] rows with has_gaze_condition=False must be zero placeholders",
         ),
         ("gaze_without_label", lambda b: b["has_gaze_label"].__setitem__(0, False), "use_gaze_condition"),
         ("open_has_action", lambda b: b["has_action"].__setitem__(2, True), "Open-source rows must have"),
@@ -5037,6 +5041,7 @@ def test_gaze_wam_inference_adapter_history_mask_and_absolute_output(tmp_path):
         raise AssertionError("Expected ambiguous image input to fail.")
 
     obs = adapter.build_obs(gaze_xy=None, action_base_abs=base_abs)
+    assert obs["has_gaze_condition"].item() is False
     assert obs["has_gaze_label"].item() is False
     assert obs["use_gaze_condition"].item() is False
     assert obs["action_base_abs"].shape == (1, 10)
@@ -5050,6 +5055,15 @@ def test_gaze_wam_inference_adapter_history_mask_and_absolute_output(tmp_path):
     assert obs_pose_only["action_base_abs"].shape == (1, 10)
     assert torch.allclose(obs_pose_only["action_base_abs"][0, :9], torch.from_numpy(pose_only_base))
     assert torch.isclose(obs_pose_only["action_base_abs"][0, 9], torch.tensor(0.07))
+
+    outside_obs = adapter.build_obs(gaze_xy=[1.25, -0.1], action_base_abs=base_abs)
+    assert outside_obs["has_gaze_condition"].item() is True
+    assert outside_obs["has_gaze_label"].item() is False
+    assert outside_obs["use_gaze_condition"].item() is True
+    assert torch.allclose(
+        outside_obs["gaze_xy"][0],
+        torch.tensor([1.25, -0.1], dtype=torch.float32),
+    )
 
 
 def test_gaze_wam_training_and_inference_image_preprocessing_are_identical():
@@ -6875,8 +6889,8 @@ def test_gaze_wam_policy_gaze_dependency_ratio(tmp_path):
             timestep=torch.zeros(2, dtype=torch.long),
         )
     except ValueError as exc:
-        assert "has_gaze_label" in str(exc)
-        assert "filter eligible point-gaze rows" in str(exc)
+        assert "has_gaze_condition" in str(exc)
+        assert "filter eligible gaze rows" in str(exc)
     else:
         raise AssertionError("Expected GDR rows without point gaze labels to fail.")
 
@@ -6894,6 +6908,18 @@ def test_gaze_wam_policy_gaze_dependency_ratio(tmp_path):
         assert "compute_gaze_dependency_ratio gaze_xy rows with has_gaze_label=True" in str(exc)
     else:
         raise AssertionError("Expected out-of-range GDR gaze input to fail.")
+
+    outside_result = policy.compute_gaze_dependency_ratio(
+        {
+            "camera0_rgb": torch.randn(1, 2, 3, 16, 16),
+            "gaze_xy": torch.tensor([[1.2, 0.5]], dtype=torch.float32),
+            "has_gaze_condition": torch.tensor([True]),
+            "has_gaze_label": torch.tensor([False]),
+        },
+        noisy_action=torch.zeros(1, 4, 10),
+        timestep=torch.zeros(1, dtype=torch.long),
+    )
+    assert outside_result["feature_gdr"].shape == (1,)
 
     try:
         policy.compute_gaze_dependency_ratio(
@@ -7323,6 +7349,7 @@ def test_loss_routing_summary_counts_source_supervision():
         "open_rows": 2,
         "has_action_rows": 2,
         "has_heatmap_rows": 3,
+        "has_gaze_condition_rows": 3,
         "has_gaze_label_rows": 3,
         "use_gaze_condition_rows": 1,
         "dropped_gaze_condition_rows": 3,
@@ -7417,14 +7444,15 @@ def test_gaze_wam_mixed_batch_builder_robot_only_baseline():
     assert torch.allclose(batch["action_base_abs"], robot_batch["action_base_abs"])
 
 
-def test_gaze_wam_mixed_batch_builder_missing_robot_gaze_trains_heatmap_under_mask():
+def test_gaze_wam_mixed_batch_builder_out_of_frame_gaze_conditions_action_only():
     robot_batch = {
         "obs": {
             "camera0_rgb": torch.randn(3, 2, 3, 16, 16),
         },
         "action": torch.randn(3, 4, 10),
         "heatmap": torch.randn(3, 1, 8, 1),
-        "gaze_xy": torch.rand(3, 2),
+        "gaze_xy": torch.tensor([[0.2, 0.3], [1.25, 0.4], [0.7, 0.8]]),
+        "has_gaze_condition": torch.tensor([True, True, True]),
         "has_gaze_label": torch.tensor([True, False, True]),
     }
 
@@ -7437,29 +7465,28 @@ def test_gaze_wam_mixed_batch_builder_missing_robot_gaze_trains_heatmap_under_ma
     )
 
     assert batch["has_action"].tolist() == [True, True, True]
+    assert batch["has_gaze_condition"].tolist() == [True, True, True]
     assert batch["has_gaze_label"].tolist() == [True, False, True]
-    assert batch["use_gaze_condition"].tolist() == [True, False, True]
-    assert batch["is_gaze_condition_dropped"].tolist() == [False, True, False]
-    assert batch["has_heatmap"].tolist() == [False, True, False]
-    assert torch.allclose(batch["gaze_xy"][1], torch.zeros_like(batch["gaze_xy"][1]))
-    assert torch.allclose(batch["heatmap"][0], torch.zeros_like(batch["heatmap"][0]))
-    assert torch.allclose(batch["heatmap"][1], robot_batch["heatmap"][1])
-    assert torch.allclose(batch["heatmap"][2], torch.zeros_like(batch["heatmap"][2]))
+    assert batch["use_gaze_condition"].tolist() == [True, True, True]
+    assert batch["is_gaze_condition_dropped"].tolist() == [False, False, False]
+    assert batch["has_heatmap"].tolist() == [False, False, False]
+    assert torch.allclose(batch["gaze_xy"][1], robot_batch["gaze_xy"][1])
+    assert torch.allclose(batch["heatmap"], torch.zeros_like(batch["heatmap"]))
 
     no_heatmap_batch = build_gaze_wam_mixed_batch(
         robot_batch=robot_batch,
         open_batch=None,
-        robot_gaze_dropout_prob=0.0,
-        robot_heatmap_on_gaze_dropout=False,
+        robot_gaze_dropout_prob=1.0,
+        robot_heatmap_on_gaze_dropout=True,
         shuffle=False,
     )
 
-    assert no_heatmap_batch["use_gaze_condition"].tolist() == [True, False, True]
-    assert no_heatmap_batch["is_gaze_condition_dropped"].tolist() == [False, True, False]
-    assert no_heatmap_batch["has_heatmap"].tolist() == [False, False, False]
+    assert no_heatmap_batch["use_gaze_condition"].tolist() == [False, False, False]
+    assert no_heatmap_batch["is_gaze_condition_dropped"].tolist() == [True, True, True]
+    assert no_heatmap_batch["has_heatmap"].tolist() == [True, False, True]
     assert torch.allclose(
-        no_heatmap_batch["heatmap"],
-        torch.zeros_like(no_heatmap_batch["heatmap"]),
+        no_heatmap_batch["heatmap"][1],
+        torch.zeros_like(no_heatmap_batch["heatmap"][1]),
     )
 
 
@@ -8819,9 +8846,10 @@ def test_gaze_wam_dataset_respects_row_has_gaze_label_mask():
         point_sample = dataset[2]
 
         assert dense_sample["has_gaze_label"].item() is False
-        assert dense_sample["use_gaze_condition"].item() is False
-        assert dense_sample["is_gaze_condition_dropped"].item() is True
-        assert torch.allclose(dense_sample["gaze_xy"], torch.zeros(2))
+        assert dense_sample["has_gaze_condition"].item() is True
+        assert dense_sample["use_gaze_condition"].item() is True
+        assert dense_sample["is_gaze_condition_dropped"].item() is False
+        assert torch.allclose(dense_sample["gaze_xy"], torch.tensor([1.25, 0.4]))
         assert dense_sample["heatmap"].shape == (1, 16, 1)
         assert dense_sample["heatmap"].max() > 0
         assert dense_sample["heatmap_image"].shape == (1, 16, 16)
@@ -9669,6 +9697,34 @@ def test_validate_gaze_wam_zarr_rejects_invalid_point_gaze():
         assert any("gaze_xy" in message and "Invalid gaze point" in message for message in open_summary["errors"])
 
 
+def test_validate_gaze_wam_zarr_accepts_out_of_frame_gaze_condition_without_label():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        robot_path = _write_gaze_wam_zarr(Path(tmpdir) / "robot.zarr", include_action=True)
+        data = zarr.open(str(robot_path), mode="a")["data"]
+        gaze_xy = np.asarray(data["gaze_xy"][:], dtype=np.float32)
+        gaze_xy[1] = np.asarray([1.25, -0.1], dtype=np.float32)
+        has_gaze_condition = np.ones((gaze_xy.shape[0],), dtype=np.bool_)
+        has_gaze_label = np.ones((gaze_xy.shape[0],), dtype=np.bool_)
+        has_gaze_label[1] = False
+        _replace_zarr_array(data, "gaze_xy", gaze_xy)
+        _replace_zarr_array(data, "has_gaze_condition", has_gaze_condition)
+        _replace_zarr_array(data, "has_gaze_label", has_gaze_label)
+
+        summary = validate_gaze_wam_zarr(
+            dataset_path=str(robot_path),
+            dataset_type="robot",
+            n_obs_steps=2,
+            action_horizon=3,
+            image_size=(16, 16),
+            heatmap_token_grid=(4, 4),
+            check_dataset_sample=False,
+        )
+
+        assert summary["valid"] is True
+        assert summary["presence_masks"]["has_gaze_condition"]["true_count"] == 6
+        assert summary["presence_masks"]["has_gaze_label"]["false_count"] == 1
+
+
 def test_validate_gaze_wam_zarr_rejects_nonfinite_actions_and_negative_heatmap():
     with tempfile.TemporaryDirectory() as tmpdir:
         root = Path(tmpdir)
@@ -9976,6 +10032,7 @@ def test_canonicalize_robot_gaze_wam_zarr_key_mapping_and_pixel_gaze():
             "gripper_width",
             "has_action_abs",
             "has_action_base_abs",
+            "has_gaze_condition",
             "has_gaze_label",
             "has_heatmap_image",
             "image_timestamp",
@@ -9986,6 +10043,7 @@ def test_canonicalize_robot_gaze_wam_zarr_key_mapping_and_pixel_gaze():
         assert summary["presence_mask_keys"] == [
             "has_action_abs",
             "has_action_base_abs",
+            "has_gaze_condition",
             "has_gaze_label",
             "has_heatmap_image",
         ]
@@ -10295,6 +10353,7 @@ def test_prepare_robot_gaze_wam_zarr_pipeline_autoinfers_and_previews():
         assert summary["validation"]["valid"] is True
         assert summary["canonicalize"]["presence_mask_keys"] == [
             "has_action_abs",
+            "has_gaze_condition",
             "has_gaze_label",
             "has_heatmap_image",
         ]

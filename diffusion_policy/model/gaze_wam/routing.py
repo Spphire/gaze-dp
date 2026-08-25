@@ -55,6 +55,11 @@ def loss_routing_summary(
         mixed["has_gaze_label"],
         batch_size,
     ).to(device=is_open.device)
+    has_gaze_condition = _require_bool_vector(
+        "mixed['has_gaze_condition']",
+        mixed.get("has_gaze_condition", has_gaze_label),
+        batch_size,
+    ).to(device=is_open.device)
     use_gaze_condition = _require_bool_vector(
         "mixed['use_gaze_condition']",
         mixed["use_gaze_condition"],
@@ -86,6 +91,7 @@ def loss_routing_summary(
         "open_rows": count(open_rows),
         "has_action_rows": count(has_action),
         "has_heatmap_rows": count(has_heatmap),
+        "has_gaze_condition_rows": count(has_gaze_condition),
         "has_gaze_label_rows": count(has_gaze_label),
         "use_gaze_condition_rows": count(use_gaze_condition),
         "dropped_gaze_condition_rows": count(is_gaze_condition_dropped),

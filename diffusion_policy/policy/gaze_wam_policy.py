@@ -46,6 +46,7 @@ class GazeWamPolicy(BaseImagePolicy):
             "has_action",
             "has_action_abs",
             "has_action_base_abs",
+            "has_gaze_condition",
             "has_gaze_label",
             "has_heatmap",
             "has_heatmap_image",
@@ -574,12 +575,14 @@ class GazeWamPolicy(BaseImagePolicy):
         obs_dict: Dict[str, torch.Tensor],
         gaze_xy: torch.Tensor,
         use_gaze_condition: Optional[torch.Tensor] = None,
+        has_gaze_condition: Optional[torch.Tensor] = None,
         has_gaze_label: Optional[torch.Tensor] = None,
     ):
         obs_tokens = self.obs_encoder(obs_dict)
         gaze_token = self.gaze_encoder(
             gaze_xy=gaze_xy,
             use_gaze_condition=use_gaze_condition,
+            has_gaze_condition=has_gaze_condition,
             has_gaze_label=has_gaze_label,
         )
         return obs_tokens, gaze_token
@@ -1097,10 +1100,11 @@ class GazeWamPolicy(BaseImagePolicy):
     def _validate_gaze_condition_inputs(
         self,
         gaze_xy: torch.Tensor,
+        has_gaze_condition: torch.Tensor,
         has_gaze_label: torch.Tensor,
         name: str,
     ) -> None:
-        batch_size = int(has_gaze_label.shape[0])
+        batch_size = int(has_gaze_condition.shape[0])
         if gaze_xy.shape != (batch_size, 2):
             raise ValueError(
                 f"{name} gaze_xy must have shape [B, 2] with B={batch_size}, "
@@ -1112,10 +1116,15 @@ class GazeWamPolicy(BaseImagePolicy):
             gaze_xy,
             has_gaze_label,
         )
-        inactive_gaze_xy = gaze_xy[~has_gaze_label]
+        if torch.any(has_gaze_label & ~has_gaze_condition):
+            raise ValueError(
+                f"{name} has_gaze_label cannot be True where "
+                "has_gaze_condition is False."
+            )
+        inactive_gaze_xy = gaze_xy[~has_gaze_condition]
         if inactive_gaze_xy.numel() > 0 and torch.any(inactive_gaze_xy != 0):
             raise ValueError(
-                f"{name} gaze_xy rows with has_gaze_label=False must be zero placeholders."
+                f"{name} gaze_xy rows with has_gaze_condition=False must be zero placeholders."
             )
 
     def _validate_action_base_abs(
@@ -1526,6 +1535,13 @@ class GazeWamPolicy(BaseImagePolicy):
         has_heatmap = batch["has_heatmap"]
         has_heatmap_target = batch.get("has_heatmap_target", has_heatmap)
         has_gaze_label = batch["has_gaze_label"]
+        has_gaze_condition = batch.get("has_gaze_condition", has_gaze_label)
+        if "has_gaze_condition" in batch:
+            self._require_bool_vector(
+                "batch['has_gaze_condition']",
+                has_gaze_condition,
+                batch_size,
+            )
         use_gaze_condition = batch["use_gaze_condition"]
         self._validate_loss_action_metadata(batch, batch_size)
         self._require_unit_interval(
@@ -1533,15 +1549,20 @@ class GazeWamPolicy(BaseImagePolicy):
             gaze_xy,
             has_gaze_label,
         )
-        inactive_gaze_xy = gaze_xy[~has_gaze_label]
+        if torch.any(has_gaze_label & ~has_gaze_condition):
+            raise ValueError(
+                "batch['has_gaze_label'] cannot be True where "
+                "batch['has_gaze_condition'] is False."
+            )
+        inactive_gaze_xy = gaze_xy[~has_gaze_condition]
         if inactive_gaze_xy.numel() > 0 and torch.any(inactive_gaze_xy != 0):
             raise ValueError(
-                "batch['gaze_xy'] rows with has_gaze_label=False must be zero placeholders."
+                "batch['gaze_xy'] rows with has_gaze_condition=False must be zero placeholders."
             )
-        if torch.any(use_gaze_condition & ~has_gaze_label):
+        if torch.any(use_gaze_condition & ~has_gaze_condition):
             raise ValueError(
                 "batch['use_gaze_condition'] cannot be True where "
-                "batch['has_gaze_label'] is False."
+                "batch['has_gaze_condition'] is False."
             )
         if torch.any(is_open & has_action):
             raise ValueError("Open-source rows must have batch['has_action']=False.")
@@ -1603,6 +1624,7 @@ class GazeWamPolicy(BaseImagePolicy):
                 device=self.device,
                 dtype=torch.bool,
             )
+            has_gaze_condition = use_gaze_condition
             has_gaze_label = use_gaze_condition
         else:
             gaze_xy = gaze_xy.to(device=self.device, dtype=self.dtype)
@@ -1616,8 +1638,14 @@ class GazeWamPolicy(BaseImagePolicy):
                 batch_size=batch_size,
                 default=True,
             )
+            has_gaze_condition = self._to_model_bool(
+                obs_dict.get("has_gaze_condition", has_gaze_label),
+                batch_size=batch_size,
+                default=True,
+            )
             self._validate_gaze_condition_inputs(
                 gaze_xy,
+                has_gaze_condition,
                 has_gaze_label,
                 "predict_action",
             )
@@ -1626,6 +1654,7 @@ class GazeWamPolicy(BaseImagePolicy):
             obs_dict=nobs,
             gaze_xy=gaze_xy,
             use_gaze_condition=use_gaze_condition,
+            has_gaze_condition=has_gaze_condition,
             has_gaze_label=has_gaze_label,
         )
         mask_gaze_token = None
@@ -1642,6 +1671,7 @@ class GazeWamPolicy(BaseImagePolicy):
                     device=self.device,
                     dtype=torch.bool,
                 ),
+                has_gaze_condition=has_gaze_condition,
                 has_gaze_label=has_gaze_label,
             )
         nsample = self.conditional_sample(
@@ -1715,7 +1745,10 @@ class GazeWamPolicy(BaseImagePolicy):
                 device=self.device,
                 dtype=self.dtype,
             )
-            has_gaze_label = torch.zeros(batch_size, device=self.device, dtype=torch.bool)
+            has_gaze_condition = torch.zeros(
+                batch_size, device=self.device, dtype=torch.bool
+            )
+            has_gaze_label = has_gaze_condition
         else:
             gaze_xy = gaze_xy.to(device=self.device, dtype=self.dtype)
             has_gaze_label = self._to_model_bool(
@@ -1723,8 +1756,14 @@ class GazeWamPolicy(BaseImagePolicy):
                 batch_size=batch_size,
                 default=True,
             )
+            has_gaze_condition = self._to_model_bool(
+                obs_dict.get("has_gaze_condition", has_gaze_label),
+                batch_size=batch_size,
+                default=True,
+            )
             self._validate_gaze_condition_inputs(
                 gaze_xy,
+                has_gaze_condition,
                 has_gaze_label,
                 "predict_heatmap",
             )
@@ -1741,6 +1780,7 @@ class GazeWamPolicy(BaseImagePolicy):
             obs_dict=nobs,
             gaze_xy=gaze_xy,
             use_gaze_condition=use_gaze_condition,
+            has_gaze_condition=has_gaze_condition,
             has_gaze_label=has_gaze_label,
         )
         use_iterative_denoise = timestep is None and noisy_heatmap is None
@@ -1872,15 +1912,21 @@ class GazeWamPolicy(BaseImagePolicy):
             batch_size=batch_size,
             default=True,
         )
+        has_gaze_condition = self._to_model_bool(
+            obs_dict.get("has_gaze_condition", has_gaze_label),
+            batch_size=batch_size,
+            default=True,
+        )
         self._validate_gaze_condition_inputs(
             gaze_xy,
+            has_gaze_condition,
             has_gaze_label,
             "compute_gaze_dependency_ratio",
         )
-        if not torch.all(has_gaze_label):
+        if not torch.all(has_gaze_condition):
             raise ValueError(
                 "compute_gaze_dependency_ratio requires every row to have "
-                "obs_dict['has_gaze_label']=True; filter eligible point-gaze rows "
+                "obs_dict['has_gaze_condition']=True; filter eligible gaze rows "
                 "before calling GDR."
             )
 
@@ -1888,11 +1934,13 @@ class GazeWamPolicy(BaseImagePolicy):
         gaze_token = self.gaze_encoder(
             gaze_xy=gaze_xy,
             use_gaze_condition=torch.ones(batch_size, device=self.device, dtype=torch.bool),
+            has_gaze_condition=has_gaze_condition,
             has_gaze_label=has_gaze_label,
         )
         mask_gaze_token = self.gaze_encoder(
             gaze_xy=gaze_xy,
             use_gaze_condition=torch.zeros(batch_size, device=self.device, dtype=torch.bool),
+            has_gaze_condition=has_gaze_condition,
             has_gaze_label=has_gaze_label,
         )
 
@@ -2030,6 +2078,9 @@ class GazeWamPolicy(BaseImagePolicy):
             obs_dict=nobs,
             gaze_xy=gaze_xy,
             use_gaze_condition=batch.get("use_gaze_condition"),
+            has_gaze_condition=batch.get(
+                "has_gaze_condition", batch.get("has_gaze_label")
+            ),
             has_gaze_label=batch.get("has_gaze_label"),
         )
         target_action = self._scheduler_target(nactions, action_noise)

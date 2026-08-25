@@ -569,13 +569,48 @@ def _validate_gaze_label_presence_consistency(
         )
 
 
-def _validate_gaze_array(gaze, gaze_key: str, errors: List[str]) -> None:
+def _validate_gaze_array(
+    gaze,
+    gaze_key: str,
+    errors: List[str],
+    has_gaze_condition=None,
+    has_gaze_label=None,
+) -> None:
     _ensure_validator_runtime()
     _check(gaze.ndim == 2 and gaze.shape[-1] == 2, f"{gaze_key} must be [N,2], got {gaze.shape}.", errors)
     if gaze.ndim != 2 or gaze.shape[-1] != 2:
         return
     values = np.asarray(gaze[:], dtype=np.float32)
+    n_steps = int(values.shape[0])
+    label_mask = (
+        np.asarray(has_gaze_label[:]).reshape(-1).astype(bool)
+        if has_gaze_label is not None
+        else np.ones((n_steps,), dtype=bool)
+    )
+    has_explicit_condition_mask = has_gaze_condition is not None
+    condition_mask = (
+        np.asarray(has_gaze_condition[:]).reshape(-1).astype(bool)
+        if has_gaze_condition is not None
+        else label_mask
+    )
+    if label_mask.shape != (n_steps,) or condition_mask.shape != (n_steps,):
+        errors.append("has_gaze_condition and has_gaze_label must have shape [N].")
+        return
+    if np.any(label_mask & ~condition_mask):
+        errors.append("has_gaze_label cannot be true where has_gaze_condition is false.")
+    if has_explicit_condition_mask and np.any(values[~condition_mask] != 0):
+        errors.append(
+            f"{gaze_key} rows with has_gaze_condition=false must be zero placeholders."
+        )
     for idx, point in enumerate(values):
+        if not np.all(np.isfinite(point)):
+            try:
+                check_gaze_bounds(point, policy="error", row_idx=idx)
+            except ValueError as exc:
+                errors.append(f"{gaze_key}: {exc}")
+            break
+        if not label_mask[idx]:
+            continue
         try:
             check_gaze_bounds(point, policy="error", row_idx=idx)
         except ValueError as exc:
@@ -1087,6 +1122,7 @@ def validate_gaze_wam_zarr(
             "has_action_abs",
             "has_action_base_abs",
             "has_heatmap_image",
+            "has_gaze_condition",
             "has_gaze_label",
         ):
             presence_summary = _validate_optional_presence_mask(
@@ -1158,7 +1194,17 @@ def validate_gaze_wam_zarr(
             if has_gaze:
                 gaze = data[gaze_key]
                 _check(gaze.shape[0] == n_steps, f"{gaze_key}.shape[0]={gaze.shape[0]} must equal n_steps={n_steps}.", errors)
-                _validate_gaze_array(gaze, gaze_key, errors)
+                _validate_gaze_array(
+                    gaze,
+                    gaze_key,
+                    errors,
+                    has_gaze_condition=(
+                        data["has_gaze_condition"] if "has_gaze_condition" in data else None
+                    ),
+                    has_gaze_label=(
+                        data["has_gaze_label"] if "has_gaze_label" in data else None
+                    ),
+                )
             if has_heatmap:
                 heatmap_summary = _validate_heatmap_array(
                     data[heatmap_key],
@@ -1184,7 +1230,17 @@ def validate_gaze_wam_zarr(
             if has_gaze:
                 gaze = data[gaze_key]
                 _check(gaze.shape[0] == n_steps, f"{gaze_key}.shape[0]={gaze.shape[0]} must equal n_steps={n_steps}.", errors)
-                _validate_gaze_array(gaze, gaze_key, errors)
+                _validate_gaze_array(
+                    gaze,
+                    gaze_key,
+                    errors,
+                    has_gaze_condition=(
+                        data["has_gaze_condition"] if "has_gaze_condition" in data else None
+                    ),
+                    has_gaze_label=(
+                        data["has_gaze_label"] if "has_gaze_label" in data else None
+                    ),
+                )
             if has_heatmap:
                 heatmap_summary = _validate_heatmap_array(
                     data[heatmap_key],
@@ -1240,6 +1296,9 @@ def validate_gaze_wam_zarr(
                         "obs_shape": _shape(sample["obs"][camera_key]),
                         "action_shape": _shape(sample["action"]),
                         "heatmap_shape": _shape(sample["heatmap"]),
+                        "has_gaze_condition": bool(
+                            sample["has_gaze_condition"].item()
+                        ),
                         "has_gaze_label": bool(sample["has_gaze_label"].item()),
                         "use_gaze_condition": bool(sample["use_gaze_condition"].item()),
                         "is_gaze_condition_dropped": bool(

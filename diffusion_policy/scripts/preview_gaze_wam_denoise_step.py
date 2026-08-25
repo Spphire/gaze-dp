@@ -57,7 +57,10 @@ def _denoise_trace(policy, obs: Dict[str, torch.Tensor], generator=None) -> Dict
             device=policy.device,
             dtype=policy.dtype,
         )
-        has_gaze_label = torch.zeros(batch_size, device=policy.device, dtype=torch.bool)
+        has_gaze_condition = torch.zeros(
+            batch_size, device=policy.device, dtype=torch.bool
+        )
+        has_gaze_label = has_gaze_condition
     else:
         gaze_xy = gaze_xy.to(device=policy.device, dtype=policy.dtype)
         has_gaze_label = policy._to_model_bool(
@@ -65,8 +68,14 @@ def _denoise_trace(policy, obs: Dict[str, torch.Tensor], generator=None) -> Dict
             batch_size=batch_size,
             default=True,
         )
+        has_gaze_condition = policy._to_model_bool(
+            obs.get("has_gaze_condition", has_gaze_label),
+            batch_size=batch_size,
+            default=True,
+        )
         policy._validate_gaze_condition_inputs(
             gaze_xy,
+            has_gaze_condition,
             has_gaze_label,
             "preview_gaze_wam_denoise_step",
         )
@@ -80,6 +89,7 @@ def _denoise_trace(policy, obs: Dict[str, torch.Tensor], generator=None) -> Dict
         obs_dict=nobs,
         gaze_xy=gaze_xy,
         use_gaze_condition=use_gaze_condition,
+        has_gaze_condition=has_gaze_condition,
         has_gaze_label=has_gaze_label,
     )
     noisy_action = torch.zeros(
@@ -264,6 +274,9 @@ def preview_gaze_wam_denoise_step(
     obs["has_gaze_label"] = batch.get(
         "has_gaze_label",
         torch.ones(batch["gaze_xy"].shape[0], device=device_obj, dtype=torch.bool),
+    )
+    obs["has_gaze_condition"] = batch.get(
+        "has_gaze_condition", obs["has_gaze_label"]
     )
     obs["use_gaze_condition"] = torch.full(
         (batch["gaze_xy"].shape[0],),

@@ -477,6 +477,9 @@ def _slice_batch(batch, mask):
 def _obs_for_metric(batch):
     obs = dict(batch["obs"])
     obs["gaze_xy"] = batch["gaze_xy"]
+    obs["has_gaze_condition"] = batch.get(
+        "has_gaze_condition", batch["has_gaze_label"]
+    )
     obs["has_gaze_label"] = batch["has_gaze_label"]
     return obs
 
@@ -2000,6 +2003,9 @@ def _write_heatmap_preview(
     preview_batch = _slice_batch(batch, selected_preview_indices)
     obs = dict(preview_batch["obs"])
     obs["gaze_xy"] = preview_batch["gaze_xy"]
+    obs["has_gaze_condition"] = preview_batch.get(
+        "has_gaze_condition", preview_batch["has_gaze_label"]
+    )
     obs["has_gaze_label"] = preview_batch["has_gaze_label"]
     obs["use_gaze_condition"] = preview_batch["use_gaze_condition"]
 

@@ -250,6 +250,7 @@ def _sample_summary(sample: Dict[str, object]) -> Dict[str, object]:
         "gaze_xy": _shape(sample["gaze_xy"]),
         "has_action": bool(sample["has_action"].item()),
         "has_heatmap": bool(sample["has_heatmap"].item()),
+        "has_gaze_condition": bool(sample["has_gaze_condition"].item()),
         "has_gaze_label": bool(sample["has_gaze_label"].item()),
         "use_gaze_condition": bool(sample["use_gaze_condition"].item()),
         "is_gaze_condition_dropped": bool(sample["is_gaze_condition_dropped"].item()),

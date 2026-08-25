@@ -318,6 +318,7 @@ class GazeWamInferenceAdapter:
         }
         if gaze_xy is None:
             gaze = np.zeros((1, 2), dtype=np.float32)
+            has_gaze_condition = np.asarray([False], dtype=bool)
             has_gaze_label = np.asarray([False], dtype=bool)
             if use_gaze_condition is None:
                 use_gaze_condition = False
@@ -331,11 +332,15 @@ class GazeWamInferenceAdapter:
                 target_image_size=self.image_size,
                 image_resize_mode=self.image_resize_mode,
             ).reshape(1, 2)
-            gaze = np.clip(gaze, 0.0, 1.0)
-            has_gaze_label = np.asarray([True], dtype=bool)
+            has_gaze_condition = np.asarray([True], dtype=bool)
+            has_gaze_label = np.asarray(
+                [bool(np.all((gaze[0] >= 0.0) & (gaze[0] <= 1.0)))],
+                dtype=bool,
+            )
             if use_gaze_condition is None:
                 use_gaze_condition = True
         obs_np["gaze_xy"] = gaze
+        obs_np["has_gaze_condition"] = has_gaze_condition
         obs_np["has_gaze_label"] = has_gaze_label
         obs_np["use_gaze_condition"] = np.asarray([bool(use_gaze_condition)], dtype=bool)
         if action_base_abs is not None:

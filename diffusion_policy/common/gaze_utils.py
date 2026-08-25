@@ -65,6 +65,7 @@ def gaussian_heatmaps_from_points(
     sigma_px: float = 20.0,
     window_size: int = 1,
     episode_ends: Optional[np.ndarray] = None,
+    valid_mask: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Render trailing-window Gaussian heatmaps from normalized gaze points.
 
@@ -76,8 +77,19 @@ def gaussian_heatmaps_from_points(
         raise ValueError(f"gaze_xy must be [N,2], got {gaze_xy.shape}.")
     if not np.all(np.isfinite(gaze_xy)):
         raise ValueError("gaze_xy must contain only finite values.")
-    if np.any(gaze_xy < 0.0) or np.any(gaze_xy > 1.0):
-        raise ValueError("gaze_xy must be normalized to [0, 1].")
+    n_steps = int(gaze_xy.shape[0])
+    if valid_mask is None:
+        valid_mask = np.ones((n_steps,), dtype=np.bool_)
+    else:
+        valid_mask = np.asarray(valid_mask).reshape(-1)
+        if valid_mask.shape != (n_steps,):
+            raise ValueError(
+                f"valid_mask must have shape [{n_steps}], got {valid_mask.shape}."
+            )
+        valid_mask = valid_mask.astype(np.bool_, copy=False)
+    valid_points = gaze_xy[valid_mask]
+    if np.any(valid_points < 0.0) or np.any(valid_points > 1.0):
+        raise ValueError("valid gaze_xy rows must be normalized to [0, 1].")
 
     if len(image_size) != 2:
         raise ValueError(f"image_size must be a pair of (height, width), got {image_size}.")
@@ -91,7 +103,6 @@ def gaussian_heatmaps_from_points(
     if window_size <= 0:
         raise ValueError(f"window_size must be positive, got {window_size}.")
 
-    n_steps = int(gaze_xy.shape[0])
     if episode_ends is None:
         episode_ends = np.asarray([n_steps], dtype=np.int64)
     else:
@@ -114,7 +125,12 @@ def gaussian_heatmaps_from_points(
         for current_idx in range(episode_start, episode_end):
             window_start = max(episode_start, current_idx - window_size + 1)
             heatmap = np.zeros((image_h, image_w), dtype=np.float32)
-            for point in gaze_xy[window_start : current_idx + 1]:
+            for point, is_valid in zip(
+                gaze_xy[window_start : current_idx + 1],
+                valid_mask[window_start : current_idx + 1],
+            ):
+                if not is_valid:
+                    continue
                 px = float(point[0]) * image_w
                 py = float(point[1]) * image_h
                 dist = ((xx - px) ** 2 + (yy - py) ** 2) / (sigma_px ** 2)

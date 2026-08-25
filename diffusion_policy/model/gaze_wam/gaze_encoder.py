@@ -39,7 +39,13 @@ def _require_bool_mask(name: str, value: torch.Tensor, shape: torch.Size) -> tor
 
 
 class GaussianSpatialEncoder(nn.Module):
-    """Encode normalized gaze coordinates with a fixed Gaussian spatial basis."""
+    """Encode normalized gaze coordinates with a fixed Gaussian spatial basis.
+
+    Finite coordinates may lie outside the image. They are clamped only inside
+    the encoder so very distant projections cannot underflow the entire basis.
+    """
+
+    EXTENDED_COORDINATE_RANGE = (-0.5, 1.5)
 
     def __init__(
         self,
@@ -81,10 +87,10 @@ class GaussianSpatialEncoder(nn.Module):
             raise ValueError(f"Expected gaze_xy last dim 2, got {gaze_xy.shape}.")
         if not torch.all(torch.isfinite(gaze_xy)):
             raise ValueError("gaze_xy must contain only finite values.")
-        if not torch.all((gaze_xy >= 0.0) & (gaze_xy <= 1.0)):
-            raise ValueError("gaze_xy must be normalized to [0, 1].")
-
-        xy = gaze_xy.to(dtype=self.centers.dtype)
+        xy = gaze_xy.to(dtype=self.centers.dtype).clamp(
+            min=self.EXTENDED_COORDINATE_RANGE[0],
+            max=self.EXTENDED_COORDINATE_RANGE[1],
+        )
         centers = self.centers.to(device=xy.device, dtype=xy.dtype)
         diff = xy.unsqueeze(-2) - centers
         out = torch.exp(-(diff.square().sum(dim=-1)) / (2 * self.sigma ** 2))
@@ -127,6 +133,7 @@ class GazeConditionEncoder(nn.Module):
         self,
         gaze_xy: torch.Tensor,
         use_gaze_condition: Optional[torch.Tensor] = None,
+        has_gaze_condition: Optional[torch.Tensor] = None,
         has_gaze_label: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if has_gaze_label is not None:
@@ -135,34 +142,48 @@ class GazeConditionEncoder(nn.Module):
                 has_gaze_label,
                 gaze_xy.shape[:-1],
             )
+        if has_gaze_condition is None:
+            has_gaze_condition = has_gaze_label
+        else:
+            has_gaze_condition = _require_bool_mask(
+                "has_gaze_condition",
+                has_gaze_condition,
+                gaze_xy.shape[:-1],
+            )
+        if has_gaze_label is not None and has_gaze_condition is not None:
+            invalid_label = has_gaze_label.to(device=has_gaze_condition.device) & ~has_gaze_condition
+            if torch.any(invalid_label):
+                raise ValueError(
+                    "has_gaze_label cannot be True where has_gaze_condition is False."
+                )
 
         if use_gaze_condition is None:
-            if has_gaze_label is None:
+            if has_gaze_condition is None:
                 use_gaze_condition = torch.ones(
                     gaze_xy.shape[:-1],
                     device=gaze_xy.device,
                     dtype=torch.bool,
                 )
             else:
-                use_gaze_condition = has_gaze_label
+                use_gaze_condition = has_gaze_condition
 
         mask = _require_bool_mask(
             "use_gaze_condition",
             use_gaze_condition,
             gaze_xy.shape[:-1],
         )
-        if has_gaze_label is not None:
-            route_label_mask = has_gaze_label.to(device=mask.device)
-            invalid_route = mask & ~route_label_mask
+        if has_gaze_condition is not None:
+            route_condition_mask = has_gaze_condition.to(device=mask.device)
+            invalid_route = mask & ~route_condition_mask
         else:
             invalid_route = None
         if invalid_route is not None and torch.any(invalid_route):
             raise ValueError(
-                "use_gaze_condition cannot be True where has_gaze_label is False; "
+                "use_gaze_condition cannot be True where has_gaze_condition is False; "
                 "missing gaze rows must use the trainable mask token."
             )
 
-        basis = self.spatial_encoder(gaze_xy, valid_mask=has_gaze_label)
+        basis = self.spatial_encoder(gaze_xy, valid_mask=has_gaze_condition)
         gaze_token = self.proj(basis).unsqueeze(1)
         mask = mask.to(device=gaze_token.device)
         mask_token = self.mask_token.to(dtype=gaze_token.dtype).expand(
