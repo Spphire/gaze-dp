@@ -10,6 +10,14 @@ export EXPECTED_NPROC_PER_NODE=8
 export RESUME=true
 export GAZE_WAM_HEATMAP_CACHE_ROOT="${GAZE_WAM_HEATMAP_CACHE_ROOT:-$ROOT/data/heatmap_cache/job-1b9f80a1-bb74-4e62-99a7-76bfeb242898-worker-0_23456}"
 
+CONTRACT_REPORT="$ROOT/data/runtime/resume_contract/$TASK_NAME.json"
+mkdir -p "$(dirname "$CONTRACT_REPORT")"
+"$ROOT/.venv/bin/python" \
+  "$ROOT/diffusion_policy/scripts/verify_gaze_condition_contract.py" \
+  --dataset-path "$ROOT/data/gaze_wam_robot_20260814_from_162120_dual_view.zarr" \
+  --require-out-of-frame \
+  > "$CONTRACT_REPORT"
+
 for dataset_name in hot3d_open_train gaze_wam_robot_20260814_from_162120_dual_view; do
   manifest="$GAZE_WAM_HEATMAP_CACHE_ROOT/$dataset_name/manifest.json"
   if [[ ! -s "$manifest" ]]; then
