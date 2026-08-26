@@ -1,0 +1,13 @@
+defaults:
+  - train_gaze_wam_chuangzhi_mix_dual_single_frame_1n8g_gbs64
+  - _self_
+
+name: train_gaze_wam_chuangzhi_mix_dual_single_frame_all_gaze_heatmap_1n8g_gbs64
+exp_name: "chuangzhi_mix_dual_shared_vit_all_gaze_heatmap_temporal_mixed_nll_1n8g_gbs64"
+
+task:
+  robot_heatmap_supervision: all_valid
+
+training:
+  init_checkpoint: data/outputs/chuangzhi/mix_dual_shared_vit_temporal_mixed_nll_1n8g_gbs64/job-0bc4dab9-08f0-4540-aa4f-8b9855be740d-worker-0_23456/checkpoints/latest.ckpt
+  checkpoint_every: 100

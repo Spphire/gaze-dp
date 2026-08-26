@@ -14,6 +14,7 @@ GAZE_WAM_TRAINING_STAGES = (
     "robot_only",
 )
 GAZE_WAM_TRANSFER_SCOPES = ("obs_encoder", "obs_and_gaze")
+GAZE_WAM_HEATMAP_SUPERVISION_MODES = ("none", "dropout_only", "all_valid")
 
 
 GAZE_WAM_REQUIRED_LOSS_ROUTING_VALIDATION_FLAGS = (
@@ -436,6 +437,14 @@ def normalize_gaze_wam_transfer_scope(
     return _normalize_choice_field(name, value, GAZE_WAM_TRANSFER_SCOPES, default)
 
 
+def normalize_gaze_wam_heatmap_supervision_mode(
+    name: str, value, default: str = "dropout_only"
+) -> str:
+    return _normalize_choice_field(
+        name, value, GAZE_WAM_HEATMAP_SUPERVISION_MODES, default
+    )
+
+
 def resolve_gaze_wam_batching_config(cfg) -> dict:
     """Resolve source quotas from total batch size and requested source ratios.
 
@@ -777,9 +786,25 @@ def validate_gaze_wam_task_routing_config(cfg):
         errors.append(str(exc))
         robot_heatmap_on_gaze_dropout = True
 
+    raw_supervision_mode = task.get("robot_heatmap_supervision", None)
+    if raw_supervision_mode is None:
+        supervision_default = "dropout_only" if robot_heatmap_on_gaze_dropout else "none"
+        robot_heatmap_supervision = supervision_default
+    else:
+        try:
+            robot_heatmap_supervision = normalize_gaze_wam_heatmap_supervision_mode(
+                "task.robot_heatmap_supervision",
+                raw_supervision_mode,
+                default="dropout_only",
+            )
+        except ValueError as exc:
+            errors.append(str(exc))
+            robot_heatmap_supervision = "dropout_only"
+
     return {
         "robot_gaze_dropout_prob": robot_gaze_dropout_prob,
         "robot_heatmap_on_gaze_dropout": robot_heatmap_on_gaze_dropout,
+        "robot_heatmap_supervision": robot_heatmap_supervision,
         "errors": errors,
         "valid": len(errors) == 0,
     }
@@ -795,6 +820,10 @@ def _normalize_gaze_wam_task_routing_config(cfg, task_routing_config):
     cfg.task.robot_heatmap_on_gaze_dropout = bool(
         task_routing_config["robot_heatmap_on_gaze_dropout"]
     )
+    with open_dict(cfg.task):
+        cfg.task.robot_heatmap_supervision = str(
+            task_routing_config["robot_heatmap_supervision"]
+        )
     return cfg
 
 
@@ -1058,6 +1087,7 @@ def validate_gaze_wam_training_config(cfg):
         errors.append(str(exc))
         stage = "mixed_train"
     transfer = training.get("transfer", None) or {}
+    init_checkpoint = str(training.get("init_checkpoint", "") or "").strip()
     transfer_load_path = str(transfer.get("load_path", "") or "").strip()
     transfer_export_path = str(transfer.get("export_path", "") or "").strip()
     try:
@@ -1177,6 +1207,7 @@ def validate_gaze_wam_training_config(cfg):
             "export_path_configured": bool(transfer_export_path),
             "export_path_optional_warning": False,
         },
+        "init_checkpoint": init_checkpoint,
         "dataloaders": dataloaders,
         "errors": errors,
         "valid": len(errors) == 0,
@@ -1215,6 +1246,8 @@ def _normalize_gaze_wam_training_config(cfg, training_config):
     cfg.training.lr_warmup_steps = int(training_config["lr_warmup_steps"])
     cfg.training.tqdm_interval_sec = float(training_config["tqdm_interval_sec"])
     cfg.training.stage = str(training_config["stage"])
+    with open_dict(cfg.training):
+        cfg.training.init_checkpoint = str(training_config.get("init_checkpoint", ""))
     if "transfer" in cfg.training:
         with open_dict(cfg.training.transfer):
             cfg.training.transfer.load_path = str(

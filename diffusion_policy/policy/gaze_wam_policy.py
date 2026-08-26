@@ -1393,9 +1393,9 @@ class GazeWamPolicy(BaseImagePolicy):
                 "is_open": False,
                 "has_action": True,
                 "use_gaze_condition": True,
-                "has_heatmap": False,
+                "has_heatmap": True,
                 "trains_action": True,
-                "trains_heatmap": False,
+                "trains_heatmap": "has_heatmap & has_gaze_label",
             },
             "robot_masked_gaze_rows": {
                 "is_open": False,
@@ -1576,11 +1576,6 @@ class GazeWamPolicy(BaseImagePolicy):
             )
         if torch.any(has_heatmap & ~has_heatmap_target):
             raise ValueError("batch['has_heatmap'] cannot be true without a heatmap target.")
-        if torch.any((~is_open) & use_gaze_condition & has_heatmap):
-            raise ValueError(
-                "Robot rows with real gaze condition must not train heatmap loss; "
-                "set batch['has_heatmap']=False or drop the gaze condition."
-            )
         inactive_action = action.reshape(batch_size, -1)[~has_action]
         if inactive_action.numel() > 0 and torch.any(inactive_action != 0):
             raise ValueError(

@@ -59,6 +59,17 @@ case "$RESUME" in
   *) echo "RESUME must be true or false, got: $RESUME" >&2; exit 2 ;;
 esac
 
+INIT_CHECKPOINT="${INIT_CHECKPOINT:-}"
+if [[ -n "$INIT_CHECKPOINT" && ! -f "$INIT_CHECKPOINT" ]]; then
+  # Relative paths are resolved from the project root, matching Hydra.
+  if [[ -f "$ROOT/$INIT_CHECKPOINT" ]]; then
+    INIT_CHECKPOINT="$ROOT/$INIT_CHECKPOINT"
+  else
+    echo "INIT_CHECKPOINT does not point to a file: $INIT_CHECKPOINT" >&2
+    exit 2
+  fi
+fi
+
 raw_run_id="${CHUANGZHI_RUN_ID:-${PET_MASTER_ADDR}_${PET_MASTER_PORT}}"
 run_id="$(printf '%s' "$raw_run_id" | tr -c 'A-Za-z0-9._-' '_')"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/data/outputs/chuangzhi/$TASK_NAME/$run_id}"
@@ -270,7 +281,7 @@ fi
 
 if [[ "$PET_NODE_RANK" == "0" ]]; then
   cp "$CONFIG_LOG" "$OUTPUT_DIR/resolved_config.yaml"
-  export TASK_NAME CONFIG_NAME ACCELERATE_CONFIG OUTPUT_DIR RESUME
+  export TASK_NAME CONFIG_NAME ACCELERATE_CONFIG OUTPUT_DIR RESUME INIT_CHECKPOINT
   export PET_MASTER_ADDR PET_MASTER_PORT PET_NNODES PET_NPROC_PER_NODE PET_NODE_RANK
   "$PYTHON_BIN" - "$MANIFEST_FILE" "$TIMING_FILE" <<'PY'
 import json
@@ -285,6 +296,7 @@ manifest = {
     "config_name": os.environ["CONFIG_NAME"],
     "accelerate_config": os.environ["ACCELERATE_CONFIG"],
     "output_dir": os.environ["OUTPUT_DIR"],
+    "init_checkpoint": os.environ.get("INIT_CHECKPOINT", ""),
     "resume": os.environ["RESUME"],
     "pet": {
         "master_addr": os.environ["PET_MASTER_ADDR"],
@@ -305,7 +317,7 @@ timing_path.write_text(json.dumps(timing, indent=2, sort_keys=True) + "\n", enco
 PY
 fi
 
-export TASK_NAME CONFIG_NAME ACCELERATE_CONFIG OUTPUT_DIR RESUME
+export TASK_NAME CONFIG_NAME ACCELERATE_CONFIG OUTPUT_DIR RESUME INIT_CHECKPOINT
 world_size=$((PET_NNODES * PET_NPROC_PER_NODE))
 launch_args=(
   launch
@@ -321,6 +333,9 @@ launch_args=(
   "training.resume=${RESUME}"
   "logging.mode=disabled"
 )
+if [[ -n "$INIT_CHECKPOINT" ]]; then
+  launch_args+=("training.init_checkpoint=$INIT_CHECKPOINT")
+fi
 if (( $# > 0 )); then
   launch_args+=("$@")
 fi

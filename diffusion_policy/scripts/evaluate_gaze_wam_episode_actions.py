@@ -178,11 +178,23 @@ def _policy_obs(batch, mode: str):
             dtype=torch.bool,
             device=batch["gaze_xy"].device,
         )
+        # Keep the missing-gaze route internally consistent with the zero
+        # placeholder above. The dataset batch may carry a real condition mask.
+        obs["has_gaze_condition"] = torch.zeros_like(obs["has_gaze_label"])
         obs["use_gaze_condition"] = torch.zeros_like(obs["has_gaze_label"])
     else:
         has_gaze_label = batch["has_gaze_label"].to(dtype=torch.bool)
-        obs["gaze_xy"] = batch["gaze_xy"]
+        has_gaze_condition = batch.get(
+            "has_gaze_condition", has_gaze_label
+        ).to(dtype=torch.bool)
+        gaze_xy = batch["gaze_xy"]
+        obs["gaze_xy"] = torch.where(
+            has_gaze_condition.unsqueeze(-1),
+            gaze_xy,
+            torch.zeros_like(gaze_xy),
+        )
         obs["has_gaze_label"] = has_gaze_label
+        obs["has_gaze_condition"] = has_gaze_condition
         obs["use_gaze_condition"] = has_gaze_label.clone()
     return obs
 

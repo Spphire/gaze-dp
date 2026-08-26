@@ -24,6 +24,7 @@ PROVENANCE_CONTRACT_FIELDS = [
     "effective_train_batch_size_per_optimizer_step",
     "robot_gaze_dropout_prob",
     "robot_heatmap_on_gaze_dropout",
+    "robot_heatmap_supervision",
     "cfg_scale",
     "use_block_attention_mask",
     "heatmap_objective",

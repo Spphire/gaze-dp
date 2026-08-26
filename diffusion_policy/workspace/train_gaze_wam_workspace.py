@@ -20,6 +20,7 @@ import time
 from typing import Optional
 
 import cv2
+import dill
 import hydra
 import numpy as np
 import torch
@@ -47,6 +48,7 @@ from diffusion_policy.common.gaze_wam_training_config import (
     gaze_wam_planned_optimizer_steps,
     gaze_wam_loss_routing_validation_guardrails_ok,
     normalize_gaze_wam_bool_field,
+    normalize_gaze_wam_heatmap_supervision_mode,
     normalize_gaze_wam_nonnegative_float_field,
     normalize_gaze_wam_nonnegative_int_field,
     normalize_gaze_wam_positive_float_field,
@@ -90,6 +92,47 @@ def _to_float(value):
     if isinstance(value, torch.Tensor):
         return value.detach().float().item()
     return float(value)
+
+
+def _load_gaze_wam_init_checkpoint(workspace, path: str) -> dict:
+    """Load model/EMA weights only; never restore optimizer or progress state."""
+    checkpoint_path = pathlib.Path(path).expanduser()
+    if not checkpoint_path.is_absolute():
+        checkpoint_path = pathlib.Path(hydra.utils.to_absolute_path(str(checkpoint_path)))
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(f"Init checkpoint does not exist: {checkpoint_path}")
+    with checkpoint_path.open("rb") as checkpoint_file:
+        payload = torch.load(checkpoint_file, pickle_module=dill, map_location="cpu")
+    if not isinstance(payload, dict) or not isinstance(payload.get("state_dicts"), dict):
+        raise ValueError(
+            "Init checkpoint must be a Gaze-WAM workspace checkpoint with state_dicts."
+        )
+    state_dicts = payload["state_dicts"]
+    model_state = state_dicts.get("model")
+    if not isinstance(model_state, dict):
+        raise ValueError(f"Init checkpoint has no model state_dict: {checkpoint_path}")
+    workspace.model.load_state_dict(model_state, strict=True)
+    loaded = ["model"]
+    if workspace.ema_model is not None and isinstance(state_dicts.get("ema_model"), dict):
+        workspace.ema_model.load_state_dict(state_dicts["ema_model"], strict=True)
+        loaded.append("ema_model")
+    elif workspace.ema_model is not None:
+        workspace.ema_model.load_state_dict(model_state, strict=True)
+        loaded.append("ema_model_from_model")
+    source_global_step = None
+    raw_global_step = (payload.get("pickles") or {}).get("global_step")
+    if isinstance(raw_global_step, (bytes, bytearray)):
+        try:
+            source_global_step = int(dill.loads(raw_global_step))
+        except Exception:
+            source_global_step = None
+    return {
+        "path": str(checkpoint_path),
+        "loaded_components": loaded,
+        "source_global_step": source_global_step,
+        "optimizer_restored": False,
+        "scheduler_restored": False,
+    }
 
 
 def _gaze_wam_autocast(accelerator):
@@ -856,6 +899,7 @@ def _build_training_contract_summary(
     policy=None,
     accelerator=None,
     transfer_load_summary=None,
+    init_checkpoint_summary=None,
     planned_optimizer_steps=None,
     epoch_driver_batches=None,
     prepared_epoch_batches=None,
@@ -872,6 +916,14 @@ def _build_training_contract_summary(
         "task.robot_heatmap_on_gaze_dropout",
         task_routing_config.get("robot_heatmap_on_gaze_dropout", True),
         default=True,
+    )
+    robot_heatmap_supervision = normalize_gaze_wam_heatmap_supervision_mode(
+        "task.robot_heatmap_supervision",
+        task_routing_config.get(
+            "robot_heatmap_supervision",
+            "dropout_only" if robot_heatmap_on_gaze_dropout else "none",
+        ),
+        default="dropout_only",
     )
     robot_batch_size = int(training_config["robot_batch_size"])
     open_batch_size = int(training_config["open_batch_size"])
@@ -1243,6 +1295,7 @@ def _build_training_contract_summary(
             0.2,
         ),
         "robot_heatmap_on_gaze_dropout": robot_heatmap_on_gaze_dropout,
+        "robot_heatmap_supervision": robot_heatmap_supervision,
         "image_shape_256": image_shape == [3, 256, 256],
         "image_resize_modes_supported": all(
             mode in SUPPORTED_PREALIGNED_IMAGE_RESIZE_MODES
@@ -1463,9 +1516,9 @@ def _build_training_contract_summary(
             "is_open": False,
             "has_action": True,
             "use_gaze_condition": True,
-            "has_heatmap": False,
+            "has_heatmap": True,
             "trains_action": True,
-            "trains_heatmap": False,
+            "trains_heatmap": "has_heatmap & has_gaze_label",
         },
         "robot_masked_gaze_rows": {
             "is_open": False,
@@ -1482,6 +1535,7 @@ def _build_training_contract_summary(
         **routing_contract,
         "robot_gaze_dropout_prob": robot_gaze_dropout_prob,
         "robot_heatmap_on_gaze_dropout": robot_heatmap_on_gaze_dropout,
+        "robot_heatmap_supervision": robot_heatmap_supervision,
     }
     checks["routing_validation_guardrails"] = (
         gaze_wam_loss_routing_validation_guardrails_ok(routing_contract)
@@ -1676,6 +1730,7 @@ def _build_training_contract_summary(
         },
         "transfer": {
             "load": dict(transfer_load_summary or {}),
+            "init_checkpoint": dict(init_checkpoint_summary or {}),
             "configured_export_path": training_config["transfer"][
                 "export_path"
             ],
@@ -2379,6 +2434,17 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                 f"scope={transfer_load_summary['scope']}"
             )
 
+        init_checkpoint_summary = None
+        init_checkpoint_path = str(cfg.training.get("init_checkpoint", "") or "").strip()
+        if init_checkpoint_path:
+            init_checkpoint_summary = _load_gaze_wam_init_checkpoint(
+                self, init_checkpoint_path
+            )
+            print(
+                "Loaded Gaze-WAM init checkpoint model weights only: "
+                f"{init_checkpoint_summary['path']}"
+            )
+
         accelerator = Accelerator(
             log_with="wandb",
             gradient_accumulation_steps=cfg.training.gradient_accumulate_every,
@@ -2571,6 +2637,7 @@ class TrainGazeWamWorkspace(BaseWorkspace):
             policy=self.model,
             accelerator=accelerator,
             transfer_load_summary=transfer_load_summary,
+            init_checkpoint_summary=init_checkpoint_summary,
             planned_optimizer_steps=planned_optimizer_steps,
             epoch_driver_batches=epoch_driver_batches,
             prepared_epoch_batches=prepared_epoch_batches,
@@ -2602,6 +2669,11 @@ class TrainGazeWamWorkspace(BaseWorkspace):
             ),
             "training_contract_robot_heatmap_on_gaze_dropout": int(
                 training_contract["routing"]["robot_heatmap_on_gaze_dropout"]
+            ),
+            "training_contract_robot_heatmap_supervision": str(
+                training_contract["routing"].get(
+                    "robot_heatmap_supervision", "dropout_only"
+                )
             ),
             "training_contract_stage": str(
                 training_contract["schedule"]["stage"]
@@ -2890,6 +2962,10 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                                 "robot_heatmap_on_gaze_dropout",
                                 True,
                             ),
+                            robot_heatmap_supervision=cfg.task.get(
+                                "robot_heatmap_supervision",
+                                "dropout_only",
+                            ),
                             shuffle=True,
                         )
 
@@ -3131,6 +3207,10 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                                     robot_heatmap_on_gaze_dropout=cfg.task.get(
                                         "robot_heatmap_on_gaze_dropout",
                                         True,
+                                    ),
+                                    robot_heatmap_supervision=cfg.task.get(
+                                        "robot_heatmap_supervision",
+                                        "dropout_only",
                                     ),
                                     generator=_make_generator_for_device(
                                         int(cfg.training.val_mixing_seed)

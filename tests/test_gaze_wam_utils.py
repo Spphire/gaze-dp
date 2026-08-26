@@ -2286,9 +2286,9 @@ def test_gaze_wam_debug_config_instantiates_policy_contract():
         "is_open": False,
         "has_action": True,
         "use_gaze_condition": True,
-        "has_heatmap": False,
+        "has_heatmap": True,
         "trains_action": True,
-        "trains_heatmap": False,
+        "trains_heatmap": "has_heatmap & has_gaze_label",
     }
     assert routing["robot_masked_gaze_rows"] == {
         "is_open": False,
@@ -3295,7 +3295,7 @@ def test_gaze_wam_debug_workspace_logs_validation_metrics():
         )
         assert contract["routing"]["open_rows"]["use_gaze_condition"] is False
         assert contract["routing"]["robot_real_gaze_rows"]["trains_action"] is True
-        assert contract["routing"]["robot_real_gaze_rows"]["trains_heatmap"] is False
+        assert contract["routing"]["robot_real_gaze_rows"]["trains_heatmap"] == "has_heatmap & has_gaze_label"
         assert contract["routing"]["robot_masked_gaze_rows"]["trains_action"] is True
         assert contract["routing"]["validation"]["open_rows_must_use_mask_token"] is True
         assert contract["routing"]["validation"][
@@ -4198,11 +4198,6 @@ def test_gaze_wam_policy_rejects_invalid_loss_batch_contract(tmp_path):
         ("open_uses_gaze", lambda b: b["use_gaze_condition"].__setitem__(2, True), "Open-source rows must use"),
         ("robot_missing_action", lambda b: b["has_action"].__setitem__(0, False), "Robot rows must have"),
         ("open_missing_heatmap", lambda b: b["has_heatmap"].__setitem__(2, False), "Open-source rows must have"),
-        (
-            "robot_real_gaze_heatmap_loss",
-            lambda b: b["has_heatmap"].__setitem__(0, True),
-            "Robot rows with real gaze condition",
-        ),
         (
             "missing_dropout_mask",
             lambda b: b.pop("is_gaze_condition_dropped"),
@@ -13886,7 +13881,7 @@ def test_preflight_gaze_wam_debug_config_runs_loss_smoke(tmp_path):
     ] is True
     assert summary["policy_contract"]["loss_routing_contract"]["robot_real_gaze_rows"][
         "trains_heatmap"
-    ] is False
+    ] == "has_heatmap & has_gaze_label"
     assert summary["policy_contract"]["loss_routing_contract"]["robot_masked_gaze_rows"][
         "trains_action"
     ] is True

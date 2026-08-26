@@ -1079,7 +1079,7 @@ def _check_policy_contract(summary: Dict[str, object], cfg) -> Sequence[str]:
             and (loss_routing_contract.get("robot_real_gaze_rows") or {}).get("trains_action")
             is True
             and (loss_routing_contract.get("robot_real_gaze_rows") or {}).get("trains_heatmap")
-            is False
+            in (False, "has_heatmap", "has_heatmap & has_gaze_label")
             and (loss_routing_contract.get("robot_masked_gaze_rows") or {}).get("trains_action")
             is True,
             "Loss routing row semantics do not match the Gaze-WAM supervision policy.",
@@ -1828,6 +1828,16 @@ def preflight_gaze_wam(
                     "task.robot_heatmap_on_gaze_dropout",
                     cfg.task.get("robot_heatmap_on_gaze_dropout", True),
                     default=True,
+                ),
+                robot_heatmap_supervision=cfg.task.get(
+                    "robot_heatmap_supervision",
+                    "dropout_only"
+                    if normalize_gaze_wam_bool_field(
+                        "task.robot_heatmap_on_gaze_dropout",
+                        cfg.task.get("robot_heatmap_on_gaze_dropout", True),
+                        default=True,
+                    )
+                    else "none",
                 ),
                 shuffle=False,
             )

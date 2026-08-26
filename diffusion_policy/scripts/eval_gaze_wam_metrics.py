@@ -331,6 +331,10 @@ def _evaluate_gaze_wam_dataset_impl(
                 open_batch=None,
                 robot_gaze_dropout_prob=robot_gaze_dropout_prob,
                 robot_heatmap_on_gaze_dropout=robot_heatmap_on_gaze_dropout,
+                robot_heatmap_supervision=cfg.task.get(
+                    "robot_heatmap_supervision",
+                    "dropout_only" if robot_heatmap_on_gaze_dropout else "none",
+                ),
                 generator=robot_dropout_generator,
                 shuffle=False,
             )

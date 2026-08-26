@@ -47,5 +47,10 @@ training:
   gradient_accumulate_every: 1
   measure_step_performance: true
 
+checkpoint:
+  # Robot validation loss is diagnostic; real-world success selects deployments.
+  topk:
+    k: 0
+
 logging:
   mode: disabled

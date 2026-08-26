@@ -4,6 +4,7 @@ import torch
 
 from diffusion_policy.common.gaze_wam_training_config import (
     normalize_gaze_wam_bool_field,
+    normalize_gaze_wam_heatmap_supervision_mode,
     normalize_gaze_wam_unit_interval_float_field,
 )
 
@@ -183,6 +184,7 @@ def build_gaze_wam_mixed_batch(
     open_batch: Optional[Dict[str, torch.Tensor]],
     robot_gaze_dropout_prob: float = 0.2,
     robot_heatmap_on_gaze_dropout: bool = True,
+    robot_heatmap_supervision: Optional[str] = None,
     generator: Optional[torch.Generator] = None,
     shuffle: bool = True,
 ) -> Dict[str, torch.Tensor]:
@@ -197,6 +199,15 @@ def build_gaze_wam_mixed_batch(
         "robot_heatmap_on_gaze_dropout",
         robot_heatmap_on_gaze_dropout,
         default=True,
+    )
+    if robot_heatmap_supervision is None:
+        robot_heatmap_supervision = (
+            "dropout_only" if robot_heatmap_on_gaze_dropout else "none"
+        )
+    robot_heatmap_supervision = normalize_gaze_wam_heatmap_supervision_mode(
+        "robot_heatmap_supervision",
+        robot_heatmap_supervision,
+        default="dropout_only",
     )
     if robot_batch is None and open_batch is None:
         raise ValueError("At least one of robot_batch or open_batch must be provided.")
@@ -342,13 +353,16 @@ def build_gaze_wam_mixed_batch(
     robot_heatmap_is_cached = _optional_bool_field(
         "robot_batch", robot_batch, "heatmap_is_cached", robot_size, device, False
     )
-    robot_has_heatmap = (
-        robot_gaze_condition_dropped
-        & robot_has_heatmap_target
-        & robot_has_gaze_label
-        if robot_heatmap_on_gaze_dropout
-        else torch.zeros_like(robot_gaze_condition_dropped)
-    )
+    if robot_heatmap_supervision == "all_valid":
+        robot_has_heatmap = robot_has_heatmap_target & robot_has_gaze_label
+    elif robot_heatmap_supervision == "dropout_only":
+        robot_has_heatmap = (
+            robot_gaze_condition_dropped
+            & robot_has_heatmap_target
+            & robot_has_gaze_label
+        )
+    else:
+        robot_has_heatmap = torch.zeros_like(robot_gaze_condition_dropped)
     if open_batch is None:
         batch = {
             "obs": robot_batch["obs"],
