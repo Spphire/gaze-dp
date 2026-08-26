@@ -2485,6 +2485,12 @@ class TrainGazeWamWorkspace(BaseWorkspace):
             )
         wandb_cfg = OmegaConf.to_container(cfg.logging, resolve=True)
         wandb_cfg.pop("project")
+        # W&B rejects tags longer than 64 characters. Keep the full task and
+        # experiment names in the resolved config/output path, but bound tags
+        # so tracker initialization cannot abort the distributed job.
+        wandb_tags = wandb_cfg.get("tags")
+        if wandb_tags is not None:
+            wandb_cfg["tags"] = [str(tag)[:64] for tag in wandb_tags]
         accelerator.init_trackers(
             project_name=cfg.logging.project,
             config=OmegaConf.to_container(cfg, resolve=True),
