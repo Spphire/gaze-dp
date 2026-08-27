@@ -10,6 +10,7 @@ is the causal-use check.
 import argparse
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
 
@@ -78,6 +79,21 @@ def _hash_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _repository_commit(path: Path) -> Optional[str]:
+    """Return the checked-out code revision without making Git a runtime dependency."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    commit = result.stdout.strip()
+    return commit or None
 
 
 def _heatmap_to_hw(value: torch.Tensor) -> torch.Tensor:
@@ -205,6 +221,12 @@ def main() -> None:
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--output", required=True)
     parser.add_argument("--trust-checkpoint", action="store_true")
+    parser.add_argument(
+        "--heatmap-mode",
+        choices=("iterative", "single_step"),
+        default="iterative",
+        help="Heatmap evaluation mode. Iterative is the final-output diagnostic.",
+    )
     args = parser.parse_args()
 
     checkpoint_path = Path(args.checkpoint).expanduser().resolve()
@@ -273,10 +295,16 @@ def main() -> None:
                     obs,
                     cfg_scale=1.0,
                 )["action_pred_relative"]
+                heatmap_generator = torch.Generator(device=device).manual_seed(1234)
                 heatmap_result = policy.predict_heatmap(
                     obs,
-                    timestep=torch.zeros(args.count, device=device, dtype=torch.long),
+                    timestep=(
+                        None
+                        if args.heatmap_mode == "iterative"
+                        else torch.zeros(args.count, device=device, dtype=torch.long)
+                    ),
                     decode=True,
+                    generator=heatmap_generator,
                 )
             peak = _peak_xy(heatmap_result["heatmap_image"])
             heatmap_tensors[mode] = _heatmap_to_hw(
@@ -296,10 +324,16 @@ def main() -> None:
                 _condition_obs(base_obs, "gt_gaze", real_gaze),
                 cfg_scale=1.0,
             )["action_pred_relative"]
+            heatmap_generator = torch.Generator(device=device).manual_seed(1234)
             ablated_heatmap = policy.predict_heatmap(
                 _condition_obs(base_obs, "gt_gaze", real_gaze),
-                timestep=torch.zeros(args.count, device=device, dtype=torch.long),
+                timestep=(
+                    None
+                    if args.heatmap_mode == "iterative"
+                    else torch.zeros(args.count, device=device, dtype=torch.long)
+                ),
                 decode=True,
+                generator=heatmap_generator,
             )
         heatmap_tensors["gt_gaze_gaze_kv_zero"] = _heatmap_to_hw(
             ablated_heatmap["heatmap_image"]
@@ -356,6 +390,7 @@ def main() -> None:
     }
     metrics.update(heatmap_l1)
 
+    repository_commit = _repository_commit(Path(__file__).resolve().parents[1])
     payload = {
         "checkpoint": str(checkpoint_path),
         "checkpoint_sha256": _hash_file(checkpoint_path),
@@ -363,6 +398,11 @@ def main() -> None:
         "indices": indices,
         "seed": 42,
         "action_seed": 1234,
+        "heatmap_mode": args.heatmap_mode,
+        # The checkpoint embeds the resolved Hydra config; this revision identifies
+        # the repository config/model contract used to interpret that payload.
+        "code_commit": repository_commit,
+        "config_commit": repository_commit,
         "architecture": "cached_dual_stream_independent_image_gaze_target_attention",
         "metrics": metrics,
         "predictions": predictions,
