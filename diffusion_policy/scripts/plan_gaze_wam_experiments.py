@@ -338,7 +338,7 @@ def _job_provenance(
     robot_heatmap_on_gaze_dropout = True
     cfg_scale = 1.0
     use_block_attention_mask = True
-    heatmap_objective = "dsnt_js"
+    heatmap_objective = "diffusion"
 
     default_stage = _default_training_stage_for_config(config_name)
     if default_stage == "open_pretrain":

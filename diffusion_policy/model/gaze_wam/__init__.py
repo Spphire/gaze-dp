@@ -15,10 +15,6 @@ from diffusion_policy.model.gaze_wam.joint_transformer import (
 )
 from diffusion_policy.model.gaze_wam.loss import (
     distributed_masked_mean,
-    dsnt_expectation,
-    per_sample_dsnt_xy_loss,
-    per_sample_spatial_point_nll_loss,
-    per_sample_spatial_js_loss,
     spatial_distribution_2d,
     spatial_softmax_2d,
 )
@@ -34,12 +30,8 @@ __all__ = [
     "CosmosHeatmapCodec",
     "HeatmapTokenCodec",
     "JointGazeWamTransformer",
-    "dsnt_expectation",
     "distributed_masked_mean",
     "gaze_dependency_ratio",
-    "per_sample_dsnt_xy_loss",
-    "per_sample_spatial_point_nll_loss",
-    "per_sample_spatial_js_loss",
     "spatial_distribution_2d",
     "spatial_softmax_2d",
 ]

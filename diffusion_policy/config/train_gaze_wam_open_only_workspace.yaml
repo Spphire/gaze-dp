@@ -11,11 +11,6 @@ task:
 policy:
   action_loss_weight: 0.0
   heatmap_loss_weight: 1.0
-  heatmap_token_kl_loss_weight: 0.0
-  heatmap_objective: dsnt_js
-  heatmap_xy_loss_weight: 1.0
-  heatmap_point_nll_loss_weight: 0.0
-  heatmap_js_loss_weight: 1.0
   heatmap_dsnt_temperature: 0.1
   heatmap_distribution_mode: intensity_softplus
   heatmap_spatial_decoder: cosmos_tokenizer

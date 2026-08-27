@@ -26,7 +26,7 @@ GAZE_WAM_REQUIRED_LOSS_ROUTING_VALIDATION_FLAGS = (
     "inactive_heatmap_rows_must_be_zero_placeholders",
     "inactive_gaze_rows_must_be_zero_placeholders",
     "inactive_optional_metadata_rows_must_be_zero_placeholders",
-    "robot_real_gaze_rows_must_not_have_heatmap_loss",
+    "robot_real_gaze_rows_have_latent_heatmap_loss",
     "is_gaze_condition_dropped_equals_not_use_gaze_condition",
 )
 

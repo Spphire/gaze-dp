@@ -25,9 +25,6 @@ from diffusion_policy.model.gaze_wam.heatmap_decoder import CosmosHeatmapCodec
 from diffusion_policy.model.gaze_wam.loss import (
     distributed_mask_count,
     distributed_masked_mean,
-    per_sample_dsnt_xy_loss,
-    per_sample_spatial_point_nll_loss,
-    per_sample_spatial_js_loss,
     spatial_distribution_2d,
 )
 from diffusion_policy.model.gaze_wam.metrics import gaze_dependency_ratio
@@ -70,13 +67,7 @@ class GazeWamPolicy(BaseImagePolicy):
         input_pertub: float = 0.1,
         action_loss_weight: float = 1.0,
         heatmap_loss_weight: float = 1.0,
-        heatmap_token_kl_loss_weight: float = 0.0,
-        heatmap_objective: str = "diffusion",
-        heatmap_xy_loss_weight: float = 1.0,
-        heatmap_point_nll_loss_weight: float = 0.0,
-        heatmap_js_loss_weight: float = 1.0,
-        heatmap_diffusion_final_loss_enabled: bool = False,
-        heatmap_final_loss_timestep_weighting: str = "none",
+        # Decode/preview settings; these never participate in training loss.
         heatmap_dsnt_temperature: float = 0.1,
         heatmap_distribution_mode: str = "intensity_softplus",
         heatmap_dsnt_target_sigma_px: float = 6.0,
@@ -290,68 +281,23 @@ class GazeWamPolicy(BaseImagePolicy):
             "heatmap_loss_weight",
             heatmap_loss_weight,
         )
-        self.heatmap_token_kl_loss_weight = self._validate_nonnegative_float(
-            "heatmap_token_kl_loss_weight",
-            heatmap_token_kl_loss_weight,
-        )
-        self.heatmap_xy_loss_weight = self._validate_nonnegative_float(
-            "heatmap_xy_loss_weight",
-            heatmap_xy_loss_weight,
-        )
-        self.heatmap_point_nll_loss_weight = self._validate_nonnegative_float(
-            "heatmap_point_nll_loss_weight",
-            heatmap_point_nll_loss_weight,
-        )
-        self.heatmap_js_loss_weight = self._validate_nonnegative_float(
-            "heatmap_js_loss_weight",
-            heatmap_js_loss_weight,
-        )
-        self.heatmap_diffusion_final_loss_enabled = normalize_gaze_wam_bool_field(
-            "policy.heatmap_diffusion_final_loss_enabled",
-            heatmap_diffusion_final_loss_enabled,
-            default=False,
-        )
-        self.heatmap_final_loss_timestep_weighting = str(
-            heatmap_final_loss_timestep_weighting
-        )
-        if self.heatmap_final_loss_timestep_weighting not in ("none", "alpha_cumprod"):
-            raise ValueError(
-                "heatmap_final_loss_timestep_weighting must be one of: "
-                "none, alpha_cumprod."
-            )
+        # Heatmap training has one supported objective: diffusion MSE in the
+        # frozen Cosmos latent space. Dense decoded losses are visualization-only.
+        self.heatmap_objective = "diffusion"
         self.heatmap_dsnt_temperature = self._validate_positive_float(
-            "heatmap_dsnt_temperature",
-            heatmap_dsnt_temperature,
+            "heatmap_dsnt_temperature", heatmap_dsnt_temperature
         )
         self.heatmap_distribution_mode = str(heatmap_distribution_mode)
         if self.heatmap_distribution_mode not in (
-            "logits_softmax",
-            "intensity_clamp",
-            "intensity_softplus",
+            "logits_softmax", "intensity_clamp", "intensity_softplus"
         ):
             raise ValueError(
                 "heatmap_distribution_mode must be one of: logits_softmax, "
-                f"intensity_clamp, intensity_softplus; got {self.heatmap_distribution_mode!r}."
+                "intensity_clamp, intensity_softplus."
             )
         self.heatmap_dsnt_target_sigma_px = self._validate_positive_float(
-            "heatmap_dsnt_target_sigma_px",
-            heatmap_dsnt_target_sigma_px,
+            "heatmap_dsnt_target_sigma_px", heatmap_dsnt_target_sigma_px
         )
-        if heatmap_objective == "sample":
-            heatmap_objective = "clean_token"
-        if heatmap_objective not in ("diffusion", "clean_token", "dsnt_js"):
-            raise ValueError(
-                "heatmap_objective must be one of: diffusion, clean_token, dsnt_js."
-            )
-        self.heatmap_objective = heatmap_objective
-        if (
-            self.heatmap_diffusion_final_loss_enabled
-            and self.heatmap_objective != "diffusion"
-        ):
-            raise ValueError(
-                "policy.heatmap_diffusion_final_loss_enabled requires "
-                "policy.heatmap_objective='diffusion'."
-            )
         self.cfg_scale = self._validate_nonnegative_float("cfg_scale", cfg_scale)
         self.kwargs = self._sanitize_scheduler_step_kwargs(noise_scheduler, kwargs)
 
@@ -613,11 +559,7 @@ class GazeWamPolicy(BaseImagePolicy):
         raise ValueError(f"Unsupported prediction type {pred_type}")
 
     def _heatmap_target(self, clean: torch.Tensor, noise: torch.Tensor) -> torch.Tensor:
-        if self.heatmap_objective in ("diffusion", "dsnt_js"):
-            return self._scheduler_target(clean, noise)
-        if self.heatmap_objective == "clean_token":
-            return clean
-        raise ValueError(f"Unsupported heatmap_objective {self.heatmap_objective}")
+        return self._scheduler_target(clean, noise)
 
     def _heatmap_clean_prediction(
         self,
@@ -625,32 +567,11 @@ class GazeWamPolicy(BaseImagePolicy):
         model_output: torch.Tensor,
         timestep: torch.Tensor,
     ) -> torch.Tensor:
-        if self.heatmap_objective in ("diffusion", "dsnt_js"):
-            return self._estimate_clean_sample(
-                sample=sample,
-                model_output=model_output,
-                timestep=timestep,
-            )
-        if self.heatmap_objective == "clean_token":
-            return model_output
-        raise ValueError(f"Unsupported heatmap_objective {self.heatmap_objective}")
-
-    @staticmethod
-    def _per_sample_heatmap_token_kl(
-        pred_clean: torch.Tensor,
-        target_clean: torch.Tensor,
-        eps: float = 1e-8,
-    ) -> torch.Tensor:
-        pred = pred_clean.float().flatten(start_dim=1)
-        target = target_clean.float().clamp_min(0.0)
-        target = target.flatten(start_dim=1)
-        pred_log_dist = F.log_softmax(pred, dim=-1)
-        target_dist = target / target.sum(dim=-1, keepdim=True).clamp_min(eps)
-        kl = target_dist * (
-            (target_dist + eps).log()
-            - pred_log_dist
+        return self._estimate_clean_sample(
+            sample=sample,
+            model_output=model_output,
+            timestep=timestep,
         )
-        return kl.sum(dim=-1)
 
     def _heatmap_tokens_to_spatial_image(
         self,
@@ -885,39 +806,6 @@ class GazeWamPolicy(BaseImagePolicy):
         alpha_prod_t = alpha_prod_t.reshape(broadcast_shape)
         beta_prod_t = beta_prod_t.reshape(broadcast_shape)
         return (sample - beta_prod_t.sqrt() * model_output) / alpha_prod_t.sqrt().clamp_min(1e-12)
-
-    def _per_sample_final_loss_weight(
-        self,
-        timestep: torch.Tensor,
-        batch_size: int,
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> torch.Tensor:
-        if self.heatmap_final_loss_timestep_weighting == "none":
-            return torch.ones(batch_size, device=device, dtype=dtype)
-        if self.heatmap_final_loss_timestep_weighting != "alpha_cumprod":
-            raise ValueError(
-                "Unsupported heatmap_final_loss_timestep_weighting "
-                f"{self.heatmap_final_loss_timestep_weighting!r}."
-            )
-        if not hasattr(self.noise_scheduler, "alphas_cumprod"):
-            raise RuntimeError(
-                "heatmap_final_loss_timestep_weighting='alpha_cumprod' requires "
-                "a scheduler with alphas_cumprod."
-            )
-        timestep = timestep.to(device=device, dtype=torch.long).reshape(-1)
-        if timestep.numel() == 1:
-            timestep = timestep.expand(batch_size)
-        if timestep.numel() != batch_size:
-            raise ValueError(
-                "timestep must contain either 1 or batch_size entries for final loss "
-                f"weighting, got {timestep.numel()} vs {batch_size}."
-            )
-        alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(
-            device=device,
-            dtype=dtype,
-        )
-        return alphas_cumprod[timestep].clamp_min(0.0)
 
     def conditional_sample(
         self,
@@ -1314,64 +1202,18 @@ class GazeWamPolicy(BaseImagePolicy):
             raise ValueError(f"{name} must have shape [B]={batch_size}, got {tuple(value.shape)}.")
 
     def loss_routing_contract_summary(self) -> Dict[str, object]:
-        uses_latent_mse = self.heatmap_objective != "dsnt_js"
-        uses_diffusion_final_loss = (
-            self.heatmap_objective != "dsnt_js"
-            and self.heatmap_diffusion_final_loss_enabled
-        )
-        if self.heatmap_objective == "dsnt_js":
-            heatmap_supervision = "full_resolution_dsnt_plus_js_after_frozen_decoder"
-            heatmap_loss_mask = "has_heatmap & has_gaze_label"
-            heatmap_target = (
-                "gaze_xy -> online 256x256 Gaussian target -> frozen Cosmos encoder "
-                "-> affine-normalized clean latent target for scheduler space; "
-                "predicted clean latent is denormalized and decoded by frozen Cosmos "
-                "before full-resolution final decoded supervision"
-            )
-            open_heatmap_training = "xy DSNT plus generated Gaussian JS target"
-        elif uses_diffusion_final_loss:
-            heatmap_supervision = (
-                "latent_diffusion_mse_plus_decoded_final_heatmap_loss"
-            )
-            heatmap_loss_mask = "has_heatmap & has_gaze_label"
-            heatmap_target = (
-                "gaze_xy/dense temporal label -> online 256x256 target -> frozen "
-                "Cosmos encoder -> affine-normalized clean latent target for "
-                "scheduler space; DiT predicts the configured diffusion target in "
-                "latent space and its reconstructed clean latent is decoded by the "
-                "frozen Cosmos decoder for auxiliary final XY/NLL/JS supervision"
-            )
-            open_heatmap_training = (
-                "latent diffusion MSE plus decoded final heatmap XY/NLL/JS loss"
-            )
-        else:
-            heatmap_supervision = "latent_diffusion_mse_against_frozen_cosmos_target"
-            heatmap_loss_mask = "has_heatmap & has_gaze_label"
-            heatmap_target = (
-                "gaze_xy -> online 256x256 Gaussian target -> frozen Cosmos encoder "
-                "-> affine-normalized clean latent target for scheduler space; "
-                "DiT predicts the configured diffusion target in latent space"
-            )
-            open_heatmap_training = "latent diffusion MSE against generated Cosmos target"
         return {
             "source": "policy",
             "dynamic_head_freezing": False,
             "action_loss_mask": "(~is_open) & has_action",
-            "heatmap_loss_mask": heatmap_loss_mask,
-            "heatmap_target": heatmap_target,
-            "heatmap_supervision": heatmap_supervision,
-            "heatmap_distribution_mode": self.heatmap_distribution_mode,
-            "latent_mse_loss": uses_latent_mse,
-            "diffusion_final_heatmap_loss": uses_diffusion_final_loss,
-            "heatmap_diffusion_final_loss_enabled": (
-                self.heatmap_diffusion_final_loss_enabled
+            "heatmap_loss_mask": "has_heatmap & has_gaze_label",
+            "heatmap_target": (
+                "temporal gaze heatmap or cached heatmap image -> frozen Cosmos "
+                "encoder -> affine-normalized clean latent target"
             ),
-            "heatmap_final_loss_timestep_weighting": (
-                self.heatmap_final_loss_timestep_weighting
-            ),
-            "heatmap_xy_loss_weight": self.heatmap_xy_loss_weight,
-            "heatmap_point_nll_loss_weight": self.heatmap_point_nll_loss_weight,
-            "heatmap_js_loss_weight": self.heatmap_js_loss_weight,
+            "heatmap_supervision": "latent_diffusion_mse_only",
+            "latent_mse_loss": True,
+            "diffusion_final_heatmap_loss": False,
             "heatmap_spatial_decoder": self.heatmap_spatial_decoder,
             "heatmap_latent_codec": "frozen_cosmos_tokenizer",
             "heatmap_objective": self.heatmap_objective,
@@ -1387,7 +1229,7 @@ class GazeWamPolicy(BaseImagePolicy):
                 "use_gaze_condition": False,
                 "gaze_token": "learned_mask",
                 "trains_action": False,
-                "trains_heatmap": open_heatmap_training,
+                "trains_heatmap": "latent diffusion MSE only",
             },
             "robot_real_gaze_rows": {
                 "is_open": False,
@@ -1455,7 +1297,7 @@ class GazeWamPolicy(BaseImagePolicy):
                 f"{expected_heatmap_4d} or {expected_heatmap_3d}, got {tuple(heatmap.shape)}."
             )
         self._require_floating_finite("batch['heatmap']", heatmap)
-        if self.heatmap_objective != "dsnt_js" and self.heatmap_spatial_decoder != "cosmos_tokenizer":
+        if self.heatmap_spatial_decoder != "cosmos_tokenizer":
             self._require_unit_interval("batch['heatmap']", heatmap)
 
         if "heatmap_image" in batch:
@@ -1847,10 +1689,7 @@ class GazeWamPolicy(BaseImagePolicy):
             heatmap_model_output = pred.heatmap
             heatmap_features = pred.heatmap_features
             noisy_heatmap_for_result = noisy_heatmap
-        if self.heatmap_objective == "dsnt_js":
-            heatmap_tokens = heatmap_tokens_raw
-        else:
-            heatmap_tokens = heatmap_tokens_raw
+        heatmap_tokens = heatmap_tokens_raw
         result = {
             "heatmap_tokens": heatmap_tokens,
             "heatmap_tokens_raw": heatmap_tokens_raw,
@@ -1868,18 +1707,11 @@ class GazeWamPolicy(BaseImagePolicy):
                     "predict_heatmap heatmap_tokens_raw",
                 )
                 result["heatmap_image_logits"] = heatmap_image_logits
-                if self.heatmap_objective == "dsnt_js":
-                    result["heatmap_image"] = spatial_distribution_2d(
-                        heatmap_image_logits,
-                        mode=self.heatmap_distribution_mode,
-                        temperature=self.heatmap_dsnt_temperature,
-                    )
-                else:
-                    result["heatmap_image"] = spatial_distribution_2d(
-                        heatmap_image_logits,
-                        mode=self.heatmap_distribution_mode,
-                        temperature=self.heatmap_dsnt_temperature,
-                    )
+                result["heatmap_image"] = spatial_distribution_2d(
+                    heatmap_image_logits,
+                    mode=self.heatmap_distribution_mode,
+                    temperature=self.heatmap_dsnt_temperature,
+                )
             else:
                 method = decode_method or self.heatmap_decode_method
                 result["heatmap_image"] = self.heatmap_codec.decode_tokens(
@@ -2097,15 +1929,11 @@ class GazeWamPolicy(BaseImagePolicy):
             **model_kwargs,
         )
 
-        if self.heatmap_objective == "dsnt_js":
-            heatmap_loss_mask = target_gaze_mask
-        else:
-            heatmap_loss_mask = (
-                target_gaze_mask
-                if self._should_generate_cosmos_latent_target()
-                else has_heatmap
-            )
-        heatmap_xy_loss_mask = target_gaze_mask
+        heatmap_loss_mask = (
+            target_gaze_mask
+            if self._should_generate_cosmos_latent_target()
+            else has_heatmap
+        )
 
         per_sample_action_loss = F.mse_loss(
             pred.action,
@@ -2114,197 +1942,40 @@ class GazeWamPolicy(BaseImagePolicy):
         )
         per_sample_action_loss = reduce(per_sample_action_loss, "b ... -> b", "mean")
 
-        pred_clean_heatmap = self._heatmap_clean_prediction(
-            sample=noisy_heatmap,
-            model_output=pred.heatmap,
-            timestep=timesteps,
-        )
-
         action_loss = distributed_masked_mean(
             per_sample_action_loss,
             action_loss_mask,
         )
-        if self.heatmap_objective == "dsnt_js":
-            pred_heatmap_image = self._heatmap_tokens_to_spatial_image(
-                pred_clean_heatmap,
-                "pred_clean_heatmap",
-            )
-            if target_heatmap_image is None:
-                raise RuntimeError("DSNT/JS heatmap target was not generated.")
-            per_sample_heatmap_xy_loss = per_sample_dsnt_xy_loss(
-                pred_heatmap_image,
-                gaze_xy,
-                temperature=self.heatmap_dsnt_temperature,
-                distribution_mode=self.heatmap_distribution_mode,
-            )
-            per_sample_heatmap_js_loss = per_sample_spatial_js_loss(
-                pred_heatmap_image,
-                target_heatmap_image,
-                temperature=self.heatmap_dsnt_temperature,
-                distribution_mode=self.heatmap_distribution_mode,
-            )
-            per_sample_heatmap_token_kl_loss = torch.zeros_like(
-                per_sample_heatmap_js_loss
-            )
-            per_sample_heatmap_point_nll_loss = torch.zeros_like(
-                per_sample_heatmap_js_loss
-            )
-            heatmap_xy_loss = distributed_masked_mean(
-                per_sample_heatmap_xy_loss,
-                heatmap_xy_loss_mask,
-            )
-            heatmap_point_nll_loss = heatmap_xy_loss * 0.0
-            heatmap_js_loss = distributed_masked_mean(
-                per_sample_heatmap_js_loss,
-                heatmap_loss_mask,
-            )
-            heatmap_token_kl_loss = distributed_masked_mean(
-                per_sample_heatmap_token_kl_loss,
-                heatmap_loss_mask,
-            )
-            per_sample_heatmap_loss = (
-                self.heatmap_xy_loss_weight * per_sample_heatmap_xy_loss
-                + self.heatmap_js_loss_weight * per_sample_heatmap_js_loss
-            )
-            heatmap_loss = (
-                self.heatmap_xy_loss_weight * heatmap_xy_loss
-                + self.heatmap_js_loss_weight * heatmap_js_loss
-            )
-        else:
-            target_heatmap = self._heatmap_target(heatmap, heatmap_noise)
-            per_sample_heatmap_loss = F.mse_loss(
-                pred.heatmap,
-                target_heatmap,
-                reduction="none",
-            )
-            per_sample_heatmap_loss = reduce(
-                per_sample_heatmap_loss,
-                "b ... -> b",
-                "mean",
-            )
-            if self._should_generate_cosmos_latent_target():
-                per_sample_heatmap_token_kl_loss = torch.zeros_like(per_sample_heatmap_loss)
-            else:
-                per_sample_heatmap_token_kl_loss = self._per_sample_heatmap_token_kl(
-                    pred_clean=pred_clean_heatmap,
-                    target_clean=heatmap,
-                )
-            heatmap_loss = distributed_masked_mean(
-                per_sample_heatmap_loss,
-                heatmap_loss_mask,
-            )
-            heatmap_token_kl_loss = distributed_masked_mean(
-                per_sample_heatmap_token_kl_loss,
-                heatmap_loss_mask,
-            )
-            if self.heatmap_diffusion_final_loss_enabled:
-                pred_heatmap_image = self._heatmap_tokens_to_spatial_image(
-                    pred_clean_heatmap,
-                    "pred_clean_heatmap",
-                )
-                if target_heatmap_image is None:
-                    target_heatmap_image = self._target_heatmap_image_from_batch_or_xy(
-                        batch=batch,
-                        gaze_xy=gaze_xy,
-                        valid_mask=target_gaze_mask,
-                    )
-                per_sample_final_loss_weight = self._per_sample_final_loss_weight(
-                    timestep=timesteps,
-                    batch_size=int(per_sample_heatmap_loss.shape[0]),
-                    device=per_sample_heatmap_loss.device,
-                    dtype=per_sample_heatmap_loss.dtype,
-                )
-                per_sample_heatmap_xy_loss = (
-                    per_sample_dsnt_xy_loss(
-                        pred_heatmap_image,
-                        gaze_xy,
-                        temperature=self.heatmap_dsnt_temperature,
-                        distribution_mode=self.heatmap_distribution_mode,
-                    )
-                    * per_sample_final_loss_weight
-                )
-                per_sample_heatmap_point_nll_loss = (
-                    per_sample_spatial_point_nll_loss(
-                        pred_heatmap_image,
-                        gaze_xy,
-                        temperature=self.heatmap_dsnt_temperature,
-                        distribution_mode=self.heatmap_distribution_mode,
-                    )
-                    * per_sample_final_loss_weight
-                )
-                per_sample_heatmap_js_loss = (
-                    per_sample_spatial_js_loss(
-                        pred_heatmap_image,
-                        target_heatmap_image,
-                        temperature=self.heatmap_dsnt_temperature,
-                        distribution_mode=self.heatmap_distribution_mode,
-                    )
-                    * per_sample_final_loss_weight
-                )
-                heatmap_xy_loss = distributed_masked_mean(
-                    per_sample_heatmap_xy_loss,
-                    heatmap_xy_loss_mask,
-                )
-                heatmap_point_nll_loss = distributed_masked_mean(
-                    per_sample_heatmap_point_nll_loss,
-                    heatmap_xy_loss_mask,
-                )
-                heatmap_js_loss = distributed_masked_mean(
-                    per_sample_heatmap_js_loss,
-                    heatmap_loss_mask,
-                )
-            else:
-                per_sample_heatmap_xy_loss = torch.zeros_like(per_sample_heatmap_loss)
-                per_sample_heatmap_point_nll_loss = torch.zeros_like(
-                    per_sample_heatmap_loss
-                )
-                per_sample_heatmap_js_loss = torch.zeros_like(per_sample_heatmap_loss)
-                heatmap_xy_loss = heatmap_loss * 0.0
-                heatmap_point_nll_loss = heatmap_loss * 0.0
-                heatmap_js_loss = heatmap_loss * 0.0
-
-        final_heatmap_loss = heatmap_loss * 0.0
-        if self.heatmap_diffusion_final_loss_enabled:
-            final_heatmap_loss = (
-                self.heatmap_xy_loss_weight * heatmap_xy_loss
-                + self.heatmap_point_nll_loss_weight * heatmap_point_nll_loss
-                + self.heatmap_js_loss_weight * heatmap_js_loss
-            )
+        target_heatmap = self._heatmap_target(heatmap, heatmap_noise)
+        per_sample_heatmap_loss = F.mse_loss(
+            pred.heatmap,
+            target_heatmap,
+            reduction="none",
+        )
+        per_sample_heatmap_loss = reduce(
+            per_sample_heatmap_loss,
+            "b ... -> b",
+            "mean",
+        )
+        heatmap_loss = distributed_masked_mean(
+            per_sample_heatmap_loss,
+            heatmap_loss_mask,
+        )
 
         loss = (
             self.action_loss_weight * action_loss
             + self.heatmap_loss_weight * heatmap_loss
-            + self.heatmap_token_kl_loss_weight * heatmap_token_kl_loss
-            + final_heatmap_loss
         )
 
         result = {
             "loss": loss,
             "action_loss": action_loss.detach(),
             "heatmap_loss": heatmap_loss.detach(),
-            "heatmap_xy_loss": heatmap_xy_loss.detach(),
-            "heatmap_point_nll_loss": heatmap_point_nll_loss.detach(),
-            "heatmap_js_loss": heatmap_js_loss.detach(),
-            "heatmap_token_kl_loss": heatmap_token_kl_loss.detach(),
-            "heatmap_token_kl_loss_weight": self.heatmap_token_kl_loss_weight,
-            "heatmap_xy_loss_weight": self.heatmap_xy_loss_weight,
-            "heatmap_point_nll_loss_weight": self.heatmap_point_nll_loss_weight,
-            "heatmap_js_loss_weight": self.heatmap_js_loss_weight,
-            "heatmap_diffusion_final_loss_enabled": (
-                self.heatmap_diffusion_final_loss_enabled
-            ),
-            "heatmap_final_loss_timestep_weighting": (
-                self.heatmap_final_loss_timestep_weighting
-            ),
-            "heatmap_dsnt_temperature": self.heatmap_dsnt_temperature,
-            "heatmap_distribution_mode": self.heatmap_distribution_mode,
-            "heatmap_dsnt_target_sigma_px": self.heatmap_dsnt_target_sigma_px,
             "heatmap_latent_scale": self.heatmap_latent_scale,
             "heatmap_latent_offset": self.heatmap_latent_offset,
             "heatmap_scheduler_clip_sample": self.heatmap_scheduler_clip_sample,
             "action_loss_mask_count": distributed_mask_count(action_loss_mask),
             "heatmap_loss_mask_count": distributed_mask_count(heatmap_loss_mask),
-            "heatmap_xy_loss_mask_count": distributed_mask_count(heatmap_xy_loss_mask),
             "heatmap_cached_target_count": distributed_mask_count(cached_target_mask),
             "heatmap_uncached_target_count": distributed_mask_count(uncached_target_mask),
         }
@@ -2313,17 +1984,8 @@ class GazeWamPolicy(BaseImagePolicy):
                 {
                     "per_sample_action_loss": per_sample_action_loss.detach(),
                     "per_sample_heatmap_loss": per_sample_heatmap_loss.detach(),
-                    "per_sample_heatmap_xy_loss": per_sample_heatmap_xy_loss.detach(),
-                    "per_sample_heatmap_point_nll_loss": (
-                        per_sample_heatmap_point_nll_loss.detach()
-                    ),
-                    "per_sample_heatmap_js_loss": per_sample_heatmap_js_loss.detach(),
-                    "per_sample_heatmap_token_kl_loss": (
-                        per_sample_heatmap_token_kl_loss.detach()
-                    ),
                     "action_loss_mask": action_loss_mask.detach(),
                     "heatmap_loss_mask": heatmap_loss_mask.detach(),
-                    "heatmap_xy_loss_mask": heatmap_xy_loss_mask.detach(),
                     "heatmap_cached_target_mask": cached_target_mask.detach(),
                     "heatmap_uncached_target_mask": uncached_target_mask.detach(),
                 }

@@ -65,13 +65,7 @@ policy:
   input_pertub: 0.1
   action_loss_weight: 1.0
   heatmap_loss_weight: 1.0
-  heatmap_token_kl_loss_weight: 0.0
-  heatmap_objective: dsnt_js
-  heatmap_xy_loss_weight: 1.0
-  heatmap_point_nll_loss_weight: 0.0
-  heatmap_js_loss_weight: 1.0
-  heatmap_diffusion_final_loss_enabled: false
-  heatmap_final_loss_timestep_weighting: none
+  # Heatmap supervision is always diffusion MSE in frozen Cosmos latent space.
   heatmap_dsnt_temperature: 0.1
   heatmap_distribution_mode: intensity_softplus
   heatmap_dsnt_target_sigma_px: 6.0

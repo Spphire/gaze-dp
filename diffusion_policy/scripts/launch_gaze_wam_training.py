@@ -902,22 +902,6 @@ def check_real_data_readiness(
         cfg.policy.get("heatmap_loss_weight", 0.0),
         name="policy.heatmap_loss_weight",
     )
-    heatmap_token_kl_loss_weight = _as_float(
-        cfg.policy.get("heatmap_token_kl_loss_weight", 0.0),
-        name="policy.heatmap_token_kl_loss_weight",
-    )
-    heatmap_xy_loss_weight = _as_float(
-        cfg.policy.get("heatmap_xy_loss_weight", 1.0),
-        name="policy.heatmap_xy_loss_weight",
-    )
-    heatmap_point_nll_loss_weight = _as_float(
-        cfg.policy.get("heatmap_point_nll_loss_weight", 0.0),
-        name="policy.heatmap_point_nll_loss_weight",
-    )
-    heatmap_js_loss_weight = _as_float(
-        cfg.policy.get("heatmap_js_loss_weight", 1.0),
-        name="policy.heatmap_js_loss_weight",
-    )
     heatmap_dsnt_temperature = _as_positive_float(
         cfg.policy.get("heatmap_dsnt_temperature", 0.1),
         default=0.1,
@@ -928,7 +912,7 @@ def check_real_data_readiness(
         "heatmap_distribution_mode",
         "intensity_softplus",
     )
-    heatmap_objective = _cfg_get_str(cfg.policy, "heatmap_objective", "")
+    heatmap_objective = "diffusion"
     add_check(
         "non_debug_config_name",
         "debug" not in lower_config_name,
@@ -1366,10 +1350,10 @@ def check_real_data_readiness(
         "Real-data main-contract launch requires task.robot_heatmap_on_gaze_dropout=true.",
     )
     add_check(
-        "heatmap_objective_dsnt_js",
-        (not enforce_main_contract) or heatmap_objective == "dsnt_js",
+        "heatmap_objective_diffusion_latent_only",
+        (not enforce_main_contract) or heatmap_objective == "diffusion",
         (
-            "Real-data main-contract launch requires policy.heatmap_objective='dsnt_js'; "
+            "Real-data main-contract launch requires latent diffusion heatmap supervision; "
             f"got {heatmap_objective!r}."
         ),
     )
@@ -1382,40 +1366,6 @@ def check_real_data_readiness(
         "heatmap_loss_weight_1",
         abs(heatmap_loss_weight - 1.0) < 1e-9,
         f"Real-data main launch requires policy.heatmap_loss_weight=1.0; got {heatmap_loss_weight!r}.",
-    )
-    add_check(
-        "heatmap_token_kl_loss_weight_0",
-        (not enforce_main_contract) or abs(heatmap_token_kl_loss_weight - 0.0) < 1e-9,
-        (
-            "Real-data main-contract launch replaces token-KL heatmap supervision with "
-            "DSNT+JS; set policy.heatmap_token_kl_loss_weight=0.0 for the main method; "
-            f"got {heatmap_token_kl_loss_weight!r}."
-        ),
-    )
-    add_check(
-        "heatmap_xy_loss_weight_1",
-        (not enforce_main_contract) or abs(heatmap_xy_loss_weight - 1.0) < 1e-9,
-        (
-            "Real-data main-contract launch requires policy.heatmap_xy_loss_weight=1.0; "
-            f"got {heatmap_xy_loss_weight!r}."
-        ),
-    )
-    add_check(
-        "heatmap_point_nll_loss_weight_0",
-        (not enforce_main_contract) or abs(heatmap_point_nll_loss_weight) < 1e-9,
-        (
-            "Real-data main-contract launch requires "
-            "policy.heatmap_point_nll_loss_weight=0.0; "
-            f"got {heatmap_point_nll_loss_weight!r}."
-        ),
-    )
-    add_check(
-        "heatmap_js_loss_weight_1",
-        (not enforce_main_contract) or abs(heatmap_js_loss_weight - 1.0) < 1e-9,
-        (
-            "Real-data main-contract launch requires policy.heatmap_js_loss_weight=1.0; "
-            f"got {heatmap_js_loss_weight!r}."
-        ),
     )
     add_check(
         "heatmap_distribution_mode_intensity_softplus",

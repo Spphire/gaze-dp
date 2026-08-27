@@ -742,16 +742,6 @@ def _policy_contract_summary(policy, cfg) -> Dict[str, object]:
         "heatmap_codec_image_size": list(policy.heatmap_codec.image_size),
         "heatmap_decode_method": str(policy.heatmap_decode_method),
         "heatmap_objective": str(policy.heatmap_objective),
-        "heatmap_token_kl_loss_weight": float(policy.heatmap_token_kl_loss_weight),
-        "heatmap_xy_loss_weight": float(policy.heatmap_xy_loss_weight),
-        "heatmap_point_nll_loss_weight": float(policy.heatmap_point_nll_loss_weight),
-        "heatmap_js_loss_weight": float(policy.heatmap_js_loss_weight),
-        "heatmap_diffusion_final_loss_enabled": bool(
-            getattr(policy, "heatmap_diffusion_final_loss_enabled", False)
-        ),
-        "heatmap_final_loss_timestep_weighting": str(
-            getattr(policy, "heatmap_final_loss_timestep_weighting", "none")
-        ),
         "heatmap_dsnt_temperature": float(policy.heatmap_dsnt_temperature),
         "heatmap_distribution_mode": str(policy.heatmap_distribution_mode),
         "num_inference_steps": int(policy.num_inference_steps),
@@ -821,26 +811,6 @@ def _check_policy_contract(summary: Dict[str, object], cfg) -> Sequence[str]:
         action_dim=task_action_dim,
         camera_key=expected_camera_key,
         heatmap_only=int(cfg.robot_dataloader.batch_size) <= 0,
-    )
-    expected_heatmap_token_kl_loss_weight = normalize_gaze_wam_nonnegative_float_field(
-        "policy.heatmap_token_kl_loss_weight",
-        cfg.policy.get("heatmap_token_kl_loss_weight", 0.0),
-        default=0.0,
-    )
-    expected_heatmap_xy_loss_weight = normalize_gaze_wam_nonnegative_float_field(
-        "policy.heatmap_xy_loss_weight",
-        cfg.policy.get("heatmap_xy_loss_weight", 1.0),
-        default=1.0,
-    )
-    expected_heatmap_point_nll_loss_weight = normalize_gaze_wam_nonnegative_float_field(
-        "policy.heatmap_point_nll_loss_weight",
-        cfg.policy.get("heatmap_point_nll_loss_weight", 0.0),
-        default=0.0,
-    )
-    expected_heatmap_js_loss_weight = normalize_gaze_wam_nonnegative_float_field(
-        "policy.heatmap_js_loss_weight",
-        cfg.policy.get("heatmap_js_loss_weight", 1.0),
-        default=1.0,
     )
     expected_heatmap_dsnt_temperature = normalize_gaze_wam_positive_float_field(
         "policy.heatmap_dsnt_temperature",
@@ -1059,27 +1029,18 @@ def _check_policy_contract(summary: Dict[str, object], cfg) -> Sequence[str]:
             is False
             and loss_routing_contract.get("action_loss_mask") == "(~is_open) & has_action"
             and loss_routing_contract.get("heatmap_loss_mask")
-            in (
-                "has_heatmap",
-                "has_heatmap & has_gaze_label",
-                "has_heatmap & has_gaze_label for dsnt_js",
-            ),
+            == "has_heatmap & has_gaze_label",
             "Loss routing contract does not match the Gaze-WAM mask policy.",
         ),
         (
             (loss_routing_contract.get("open_rows") or {}).get("trains_action")
             is False
             and (loss_routing_contract.get("open_rows") or {}).get("trains_heatmap")
-            in (
-                True,
-                "xy DSNT plus generated Gaussian JS target",
-                "latent diffusion MSE against generated Cosmos target",
-                "latent diffusion MSE plus decoded final heatmap XY/NLL/JS loss",
-            )
+            == "latent diffusion MSE only"
             and (loss_routing_contract.get("robot_real_gaze_rows") or {}).get("trains_action")
             is True
             and (loss_routing_contract.get("robot_real_gaze_rows") or {}).get("trains_heatmap")
-            in (False, "has_heatmap", "has_heatmap & has_gaze_label")
+            == "has_heatmap & has_gaze_label"
             and (loss_routing_contract.get("robot_masked_gaze_rows") or {}).get("trains_action")
             is True,
             "Loss routing row semantics do not match the Gaze-WAM supervision policy.",
@@ -1169,38 +1130,6 @@ def _check_policy_contract(summary: Dict[str, object], cfg) -> Sequence[str]:
             or summary.get("heatmap_scheduler_clip_sample")
             is expected_heatmap_scheduler_clip_sample,
             "Policy heatmap scheduler clip_sample override does not match config.",
-        ),
-        (
-            abs(
-                float(summary.get("heatmap_token_kl_loss_weight", 0.0))
-                - expected_heatmap_token_kl_loss_weight
-            )
-            < 1e-9,
-            "Policy heatmap token KL loss weight does not match config.",
-        ),
-        (
-            abs(
-                float(summary.get("heatmap_xy_loss_weight", 0.0))
-                - expected_heatmap_xy_loss_weight
-            )
-            < 1e-9,
-            "Policy heatmap DSNT xy loss weight does not match config.",
-        ),
-        (
-            abs(
-                float(summary.get("heatmap_point_nll_loss_weight", 0.0))
-                - expected_heatmap_point_nll_loss_weight
-            )
-            < 1e-9,
-            "Policy heatmap point NLL loss weight does not match config.",
-        ),
-        (
-            abs(
-                float(summary.get("heatmap_js_loss_weight", 0.0))
-                - expected_heatmap_js_loss_weight
-            )
-            < 1e-9,
-            "Policy heatmap JS loss weight does not match config.",
         ),
         (
             abs(
@@ -1847,32 +1776,6 @@ def preflight_gaze_wam(
                 "loss": _to_float(components["loss"]),
                 "action_loss": _to_float(components["action_loss"]),
                 "heatmap_loss": _to_float(components["heatmap_loss"]),
-                "heatmap_xy_loss": _to_float(components["heatmap_xy_loss"]),
-                "heatmap_point_nll_loss": _to_float(
-                    components["heatmap_point_nll_loss"]
-                ),
-                "heatmap_js_loss": _to_float(components["heatmap_js_loss"]),
-                "heatmap_token_kl_loss": _to_float(
-                    components["heatmap_token_kl_loss"]
-                ),
-                "heatmap_token_kl_loss_weight": float(
-                    components["heatmap_token_kl_loss_weight"]
-                ),
-                "heatmap_xy_loss_weight": float(
-                    components["heatmap_xy_loss_weight"]
-                ),
-                "heatmap_point_nll_loss_weight": float(
-                    components["heatmap_point_nll_loss_weight"]
-                ),
-                "heatmap_js_loss_weight": float(
-                    components["heatmap_js_loss_weight"]
-                ),
-                "heatmap_diffusion_final_loss_enabled": bool(
-                    components["heatmap_diffusion_final_loss_enabled"]
-                ),
-                "heatmap_final_loss_timestep_weighting": str(
-                    components["heatmap_final_loss_timestep_weighting"]
-                ),
                 "heatmap_dsnt_temperature": float(
                     components["heatmap_dsnt_temperature"]
                 ),
@@ -1881,9 +1784,6 @@ def preflight_gaze_wam(
                 ),
                 "action_loss_mask_count": _to_float(components["action_loss_mask_count"]),
                 "heatmap_loss_mask_count": _to_float(components["heatmap_loss_mask_count"]),
-                "heatmap_xy_loss_mask_count": _to_float(
-                    components["heatmap_xy_loss_mask_count"]
-                ),
                 "mixed_batch_size": int(mixed["gaze_xy"].shape[0]),
                 "mixed_obs": _shape(mixed["obs"]),
                 "mixed_action": _shape(mixed["action"]),

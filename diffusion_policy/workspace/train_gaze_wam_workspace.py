@@ -341,12 +341,7 @@ def _new_train_window_log_accumulator():
         "action_loss_sum": 0.0,
         "action_mask_count": 0.0,
         "heatmap_loss_sum": 0.0,
-        "heatmap_xy_loss_sum": 0.0,
-        "heatmap_point_nll_loss_sum": 0.0,
-        "heatmap_js_loss_sum": 0.0,
-        "heatmap_token_kl_loss_sum": 0.0,
         "heatmap_mask_count": 0.0,
-        "heatmap_xy_mask_count": 0.0,
         "routing": {},
     }
 
@@ -356,26 +351,12 @@ def _accumulate_train_window_log(accumulator, raw_loss, components, routing_summ
     accumulator["microbatch_count"] += 1.0
     action_mask_count = _to_float(components["action_loss_mask_count"])
     heatmap_mask_count = _to_float(components["heatmap_loss_mask_count"])
-    heatmap_xy_mask_count = _to_float(components["heatmap_xy_loss_mask_count"])
     accumulator["action_loss_sum"] += _to_float(components["action_loss"]) * action_mask_count
     accumulator["action_mask_count"] += action_mask_count
     accumulator["heatmap_loss_sum"] += (
         _to_float(components["heatmap_loss"]) * heatmap_mask_count
     )
-    accumulator["heatmap_xy_loss_sum"] += (
-        _to_float(components["heatmap_xy_loss"]) * heatmap_xy_mask_count
-    )
-    accumulator["heatmap_point_nll_loss_sum"] += (
-        _to_float(components["heatmap_point_nll_loss"]) * heatmap_xy_mask_count
-    )
-    accumulator["heatmap_js_loss_sum"] += (
-        _to_float(components["heatmap_js_loss"]) * heatmap_mask_count
-    )
-    accumulator["heatmap_token_kl_loss_sum"] += (
-        _to_float(components["heatmap_token_kl_loss"]) * heatmap_mask_count
-    )
     accumulator["heatmap_mask_count"] += heatmap_mask_count
-    accumulator["heatmap_xy_mask_count"] += heatmap_xy_mask_count
     routing_accumulator = accumulator["routing"]
     for key, value in routing_summary.items():
         routing_accumulator[key] = routing_accumulator.get(key, 0.0) + float(value)
@@ -385,7 +366,6 @@ def _finalize_train_window_log(accumulator):
     microbatch_count = max(float(accumulator["microbatch_count"]), 1.0)
     action_mask_count = float(accumulator["action_mask_count"])
     heatmap_mask_count = float(accumulator["heatmap_mask_count"])
-    heatmap_xy_mask_count = float(accumulator["heatmap_xy_mask_count"])
     result = {
         "train_loss": float(accumulator["raw_loss_sum"]) / microbatch_count,
         "train_action_loss": (
@@ -398,29 +378,8 @@ def _finalize_train_window_log(accumulator):
             if heatmap_mask_count > 0
             else 0.0
         ),
-        "train_heatmap_xy_loss": (
-            float(accumulator["heatmap_xy_loss_sum"]) / heatmap_xy_mask_count
-            if heatmap_xy_mask_count > 0
-            else 0.0
-        ),
-        "train_heatmap_point_nll_loss": (
-            float(accumulator["heatmap_point_nll_loss_sum"]) / heatmap_xy_mask_count
-            if heatmap_xy_mask_count > 0
-            else 0.0
-        ),
-        "train_heatmap_js_loss": (
-            float(accumulator["heatmap_js_loss_sum"]) / heatmap_mask_count
-            if heatmap_mask_count > 0
-            else 0.0
-        ),
-        "train_heatmap_token_kl_loss": (
-            float(accumulator["heatmap_token_kl_loss_sum"]) / heatmap_mask_count
-            if heatmap_mask_count > 0
-            else 0.0
-        ),
         "train_action_mask_count": action_mask_count,
         "train_heatmap_mask_count": heatmap_mask_count,
-        "train_heatmap_xy_mask_count": heatmap_xy_mask_count,
         "train_accumulated_microbatches": int(accumulator["microbatch_count"]),
     }
     for key, value in accumulator["routing"].items():
@@ -1091,41 +1050,6 @@ def _build_training_contract_summary(
         0.0,
         "policy.heatmap_loss_weight",
     )
-    heatmap_token_kl_loss_weight = _cfg_get_nonnegative_float(
-        cfg.policy,
-        "heatmap_token_kl_loss_weight",
-        0.0,
-        "policy.heatmap_token_kl_loss_weight",
-    )
-    heatmap_xy_loss_weight = _cfg_get_nonnegative_float(
-        cfg.policy,
-        "heatmap_xy_loss_weight",
-        1.0,
-        "policy.heatmap_xy_loss_weight",
-    )
-    heatmap_point_nll_loss_weight = _cfg_get_nonnegative_float(
-        cfg.policy,
-        "heatmap_point_nll_loss_weight",
-        0.0,
-        "policy.heatmap_point_nll_loss_weight",
-    )
-    heatmap_js_loss_weight = _cfg_get_nonnegative_float(
-        cfg.policy,
-        "heatmap_js_loss_weight",
-        1.0,
-        "policy.heatmap_js_loss_weight",
-    )
-    heatmap_diffusion_final_loss_enabled = _cfg_get_bool(
-        cfg.policy,
-        "heatmap_diffusion_final_loss_enabled",
-        False,
-        "policy.heatmap_diffusion_final_loss_enabled",
-    )
-    heatmap_final_loss_timestep_weighting = _cfg_get_str(
-        cfg.policy,
-        "heatmap_final_loss_timestep_weighting",
-        "none",
-    )
     heatmap_dsnt_target_sigma_px = _cfg_get_nonnegative_float(
         cfg.policy,
         "heatmap_dsnt_target_sigma_px",
@@ -1262,18 +1186,10 @@ def _build_training_contract_summary(
         )
     )
 
-    heatmap_objective = _cfg_get_str(cfg.policy, "heatmap_objective")
-    heatmap_uses_latent_mse = heatmap_objective != "dsnt_js"
-    heatmap_uses_diffusion_final_loss = (
-        heatmap_objective == "diffusion" and heatmap_diffusion_final_loss_enabled
-    )
-    heatmap_supervision = (
-        "full_resolution_dsnt_plus_js_after_frozen_decoder"
-        if heatmap_objective == "dsnt_js"
-        else "latent_diffusion_mse_plus_decoded_final_heatmap_loss"
-        if heatmap_uses_diffusion_final_loss
-        else "latent_diffusion_mse_against_frozen_cosmos_target"
-    )
+    heatmap_objective = "diffusion"
+    heatmap_uses_latent_mse = True
+    heatmap_uses_diffusion_final_loss = False
+    heatmap_supervision = "latent_diffusion_mse_only"
     temporal_heatmap_mode = _cfg_get_str(cfg.task, "temporal_heatmap_mode", "off")
     temporal_heatmap_label_source = (
         "temporal_window_dense_heatmap"
@@ -1459,7 +1375,7 @@ def _build_training_contract_summary(
             False,
             "policy.use_block_attention_mask",
         ),
-        "heatmap_objective_dsnt_js": heatmap_objective == "dsnt_js",
+        "heatmap_objective_diffusion": heatmap_objective == "diffusion",
         "action_loss_weight_matches_active_sources": (
             action_loss_weight_matches_active_sources
         ),
@@ -1470,20 +1386,7 @@ def _build_training_contract_summary(
             use_robot_data or _close_fraction(action_loss_weight, 0.0)
         ),
         "heatmap_loss_weight_1": _close_fraction(heatmap_loss_weight, 1.0),
-        "heatmap_token_kl_loss_weight_0": _close_fraction(
-            heatmap_token_kl_loss_weight,
-            0.0,
-        ),
-        "heatmap_point_nll_loss_weight_0": _close_fraction(
-            heatmap_point_nll_loss_weight,
-            0.0,
-        ),
-        "heatmap_xy_loss_weight_1": _close_fraction(heatmap_xy_loss_weight, 1.0),
-        "heatmap_js_loss_weight_1": _close_fraction(heatmap_js_loss_weight, 1.0),
-        "heatmap_diffusion_final_loss_enabled_valid": (
-            not heatmap_diffusion_final_loss_enabled
-            or heatmap_objective == "diffusion"
-        ),
+        "heatmap_latent_only": True,
     }
 
     train_sequence_tokens = max_image_tokens + 1 + action_horizon + heatmap_num_tokens
@@ -1522,14 +1425,14 @@ def _build_training_contract_summary(
         "source": "config",
         "dynamic_head_freezing": False,
         "action_loss_mask": "(~is_open) & has_action",
-        "heatmap_loss_mask": "has_heatmap",
+        "heatmap_loss_mask": "has_heatmap & has_gaze_label",
         "open_rows": {
             "has_action": False,
             "has_heatmap": True,
             "use_gaze_condition": False,
             "gaze_token": "learned_mask",
             "trains_action": False,
-            "trains_heatmap": True,
+            "trains_heatmap": "latent diffusion MSE only",
         },
         "robot_real_gaze_rows": {
             "is_open": False,
@@ -1545,7 +1448,7 @@ def _build_training_contract_summary(
             "use_gaze_condition": False,
             "gaze_token": "learned_mask",
             "trains_action": True,
-            "trains_heatmap": "has_heatmap",
+            "trains_heatmap": "has_heatmap & has_gaze_label",
         },
     }
     if policy is not None and hasattr(policy, "loss_routing_contract_summary"):
@@ -1771,10 +1674,6 @@ def _build_training_contract_summary(
         "loss": {
             "action_loss_weight": action_loss_weight,
             "heatmap_loss_weight": heatmap_loss_weight,
-            "heatmap_token_kl_loss_weight": heatmap_token_kl_loss_weight,
-            "heatmap_xy_loss_weight": heatmap_xy_loss_weight,
-            "heatmap_point_nll_loss_weight": heatmap_point_nll_loss_weight,
-            "heatmap_js_loss_weight": heatmap_js_loss_weight,
             "heatmap_dsnt_temperature": heatmap_dsnt_temperature,
             "heatmap_distribution_mode": heatmap_distribution_mode,
             "heatmap_dsnt_target_sigma_px": heatmap_dsnt_target_sigma_px,
@@ -1782,12 +1681,6 @@ def _build_training_contract_summary(
             "heatmap_supervision": heatmap_supervision,
             "latent_mse_loss": heatmap_uses_latent_mse,
             "diffusion_final_heatmap_loss": heatmap_uses_diffusion_final_loss,
-            "heatmap_diffusion_final_loss_enabled": (
-                heatmap_diffusion_final_loss_enabled
-            ),
-            "heatmap_final_loss_timestep_weighting": (
-                heatmap_final_loss_timestep_weighting
-            ),
             "heatmap_label_source": temporal_heatmap_label_source,
             "temporal_heatmap": {
                 "mode": temporal_heatmap_mode,
@@ -2281,19 +2174,10 @@ def _write_heatmap_preview(
             }
         )
 
-    heatmap_objective = str(policy.heatmap_objective)
-    latent_mse_loss = heatmap_objective != "dsnt_js"
-    diffusion_final_heatmap_loss = bool(
-        heatmap_objective == "diffusion"
-        and getattr(policy, "heatmap_diffusion_final_loss_enabled", False)
-    )
-    heatmap_supervision = (
-        "full_resolution_dsnt_plus_js_after_frozen_decoder"
-        if heatmap_objective == "dsnt_js"
-        else "latent_diffusion_mse_plus_decoded_final_heatmap_loss"
-        if diffusion_final_heatmap_loss
-        else "latent_diffusion_mse_against_frozen_cosmos_target"
-    )
+    heatmap_objective = "diffusion"
+    latent_mse_loss = True
+    diffusion_final_heatmap_loss = False
+    heatmap_supervision = "latent_diffusion_mse_only"
     summary = {
         "epoch": int(epoch),
         "camera_key": camera_key,
@@ -2304,12 +2188,6 @@ def _write_heatmap_preview(
         "heatmap_supervision": heatmap_supervision,
         "latent_mse_loss": latent_mse_loss,
         "diffusion_final_heatmap_loss": diffusion_final_heatmap_loss,
-        "heatmap_diffusion_final_loss_enabled": bool(
-            getattr(policy, "heatmap_diffusion_final_loss_enabled", False)
-        ),
-        "heatmap_final_loss_timestep_weighting": str(
-            getattr(policy, "heatmap_final_loss_timestep_weighting", "none")
-        ),
         "selected_batch_indices": [
             int(v) for v in selected_preview_indices.detach().cpu().tolist()
         ],
@@ -3196,21 +3074,11 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                         "action_loss_sum": 0.0,
                         "action_mask_count": 0.0,
                         "heatmap_loss_sum": 0.0,
-                        "heatmap_xy_loss_sum": 0.0,
-                        "heatmap_point_nll_loss_sum": 0.0,
-                        "heatmap_js_loss_sum": 0.0,
-                        "heatmap_token_kl_loss_sum": 0.0,
                         "heatmap_mask_count": 0.0,
-                        "heatmap_xy_mask_count": 0.0,
                         "robot_action_loss_sum": 0.0,
                         "robot_action_mask_count": 0.0,
                         "robot_heatmap_loss_sum": 0.0,
                         "robot_heatmap_mask_count": 0.0,
-                        "robot_heatmap_xy_loss_sum": 0.0,
-                        "robot_heatmap_xy_mask_count": 0.0,
-                        "robot_heatmap_point_nll_loss_sum": 0.0,
-                        "robot_heatmap_js_loss_sum": 0.0,
-                        "robot_heatmap_token_kl_loss_sum": 0.0,
                         "open_heatmap_loss_sum": 0.0,
                         "open_heatmap_mask_count": 0.0,
                     }
@@ -3279,34 +3147,21 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                                 (
                                     gather_action_loss,
                                     gather_heatmap_loss,
-                                    gather_heatmap_xy_loss,
-                                    gather_heatmap_point_nll_loss,
-                                    gather_heatmap_js_loss,
-                                    gather_heatmap_token_kl_loss,
                                     gather_action_mask,
                                     gather_heatmap_mask,
-                                    gather_heatmap_xy_mask,
                                     gather_is_open,
                                 ) = accelerator.gather_for_metrics(
                                     (
                                         components["per_sample_action_loss"],
                                         components["per_sample_heatmap_loss"],
-                                        components["per_sample_heatmap_xy_loss"],
-                                        components["per_sample_heatmap_point_nll_loss"],
-                                        components["per_sample_heatmap_js_loss"],
-                                        components["per_sample_heatmap_token_kl_loss"],
                                         components["action_loss_mask"].to(torch.float32),
                                         components["heatmap_loss_mask"].to(torch.float32),
-                                        components["heatmap_xy_loss_mask"].to(torch.float32),
                                         batch["is_open"].to(torch.float32),
                                     )
                                 )
                                 gather_is_robot = 1.0 - gather_is_open
                                 gather_robot_action_mask = gather_action_mask * gather_is_robot
                                 gather_robot_heatmap_mask = gather_heatmap_mask * gather_is_robot
-                                gather_robot_heatmap_xy_mask = (
-                                    gather_heatmap_xy_mask * gather_is_robot
-                                )
                                 gather_open_heatmap_mask = gather_heatmap_mask * gather_is_open
                                 val_metrics["action_loss_sum"] += float(
                                     (gather_action_loss * gather_action_mask).sum().item()
@@ -3317,32 +3172,8 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                                 val_metrics["heatmap_loss_sum"] += float(
                                     (gather_heatmap_loss * gather_heatmap_mask).sum().item()
                                 )
-                                val_metrics["heatmap_xy_loss_sum"] += float(
-                                    (
-                                        gather_heatmap_xy_loss
-                                        * gather_heatmap_xy_mask
-                                    ).sum().item()
-                                )
-                                val_metrics["heatmap_point_nll_loss_sum"] += float(
-                                    (
-                                        gather_heatmap_point_nll_loss
-                                        * gather_heatmap_xy_mask
-                                    ).sum().item()
-                                )
-                                val_metrics["heatmap_js_loss_sum"] += float(
-                                    (gather_heatmap_js_loss * gather_heatmap_mask).sum().item()
-                                )
-                                val_metrics["heatmap_token_kl_loss_sum"] += float(
-                                    (
-                                        gather_heatmap_token_kl_loss
-                                        * gather_heatmap_mask
-                                    ).sum().item()
-                                )
                                 val_metrics["heatmap_mask_count"] += float(
                                     gather_heatmap_mask.sum().item()
-                                )
-                                val_metrics["heatmap_xy_mask_count"] += float(
-                                    gather_heatmap_xy_mask.sum().item()
                                 )
                                 val_metrics["robot_action_loss_sum"] += float(
                                     (gather_action_loss * gather_robot_action_mask).sum().item()
@@ -3355,33 +3186,6 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                                 )
                                 val_metrics["robot_heatmap_mask_count"] += float(
                                     gather_robot_heatmap_mask.sum().item()
-                                )
-                                val_metrics["robot_heatmap_xy_loss_sum"] += float(
-                                    (
-                                        gather_heatmap_xy_loss
-                                        * gather_robot_heatmap_xy_mask
-                                    ).sum().item()
-                                )
-                                val_metrics["robot_heatmap_xy_mask_count"] += float(
-                                    gather_robot_heatmap_xy_mask.sum().item()
-                                )
-                                val_metrics["robot_heatmap_point_nll_loss_sum"] += float(
-                                    (
-                                        gather_heatmap_point_nll_loss
-                                        * gather_robot_heatmap_xy_mask
-                                    ).sum().item()
-                                )
-                                val_metrics["robot_heatmap_js_loss_sum"] += float(
-                                    (
-                                        gather_heatmap_js_loss
-                                        * gather_robot_heatmap_mask
-                                    ).sum().item()
-                                )
-                                val_metrics["robot_heatmap_token_kl_loss_sum"] += float(
-                                    (
-                                        gather_heatmap_token_kl_loss
-                                        * gather_robot_heatmap_mask
-                                    ).sum().item()
                                 )
                                 val_metrics["open_heatmap_loss_sum"] += float(
                                     (gather_heatmap_loss * gather_open_heatmap_mask).sum().item()
@@ -3417,10 +3221,6 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                                     break
                     val_action_loss = None
                     val_heatmap_loss = None
-                    val_heatmap_xy_loss = None
-                    val_heatmap_point_nll_loss = None
-                    val_heatmap_js_loss = None
-                    val_heatmap_token_kl_loss = None
                     if val_metrics["action_mask_count"] > 0:
                         val_action_loss = (
                             val_metrics["action_loss_sum"] / val_metrics["action_mask_count"]
@@ -3431,36 +3231,9 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                             val_metrics["heatmap_loss_sum"] / val_metrics["heatmap_mask_count"]
                         )
                         step_log["val_heatmap_loss"] = val_heatmap_loss
-                        val_heatmap_js_loss = (
-                            val_metrics["heatmap_js_loss_sum"]
-                            / val_metrics["heatmap_mask_count"]
-                        )
-                        step_log["val_heatmap_js_loss"] = val_heatmap_js_loss
-                        val_heatmap_token_kl_loss = (
-                            val_metrics["heatmap_token_kl_loss_sum"]
-                            / val_metrics["heatmap_mask_count"]
-                        )
-                        step_log["val_heatmap_token_kl_loss"] = val_heatmap_token_kl_loss
-                    if val_metrics["heatmap_xy_mask_count"] > 0:
-                        val_heatmap_xy_loss = (
-                            val_metrics["heatmap_xy_loss_sum"]
-                            / val_metrics["heatmap_xy_mask_count"]
-                        )
-                        step_log["val_heatmap_xy_loss"] = val_heatmap_xy_loss
-                        val_heatmap_point_nll_loss = (
-                            val_metrics["heatmap_point_nll_loss_sum"]
-                            / val_metrics["heatmap_xy_mask_count"]
-                        )
-                        step_log["val_heatmap_point_nll_loss"] = (
-                            val_heatmap_point_nll_loss
-                        )
                     if (
                         val_action_loss is not None
                         or val_heatmap_loss is not None
-                        or val_heatmap_xy_loss is not None
-                        or val_heatmap_point_nll_loss is not None
-                        or val_heatmap_js_loss is not None
-                        or val_heatmap_token_kl_loss is not None
                     ):
                         loss = 0.0
                         policy_module = accelerator.unwrap_model(self.model)
@@ -3468,31 +3241,6 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                             loss += float(policy_module.action_loss_weight) * val_action_loss
                         if val_heatmap_loss is not None:
                             loss += float(policy_module.heatmap_loss_weight) * val_heatmap_loss
-                        if val_heatmap_token_kl_loss is not None:
-                            loss += (
-                                float(policy_module.heatmap_token_kl_loss_weight)
-                                * val_heatmap_token_kl_loss
-                            )
-                        if getattr(
-                            policy_module,
-                            "heatmap_diffusion_final_loss_enabled",
-                            False,
-                        ):
-                            if val_heatmap_xy_loss is not None:
-                                loss += (
-                                    float(policy_module.heatmap_xy_loss_weight)
-                                    * val_heatmap_xy_loss
-                                )
-                            if val_heatmap_point_nll_loss is not None:
-                                loss += (
-                                    float(policy_module.heatmap_point_nll_loss_weight)
-                                    * val_heatmap_point_nll_loss
-                                )
-                            if val_heatmap_js_loss is not None:
-                                loss += (
-                                    float(policy_module.heatmap_js_loss_weight)
-                                    * val_heatmap_js_loss
-                                )
                         step_log["val_loss"] = loss
                     if val_metrics["robot_action_mask_count"] > 0:
                         step_log["val_robot_action_loss"] = (
@@ -3524,22 +3272,6 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                             "robot_heatmap_loss_sum",
                             "robot_heatmap_mask_count",
                         )
-                        robot_heatmap_xy_loss = _metric_mean(
-                            "robot_heatmap_xy_loss_sum",
-                            "robot_heatmap_xy_mask_count",
-                        )
-                        robot_heatmap_point_nll_loss = _metric_mean(
-                            "robot_heatmap_point_nll_loss_sum",
-                            "robot_heatmap_xy_mask_count",
-                        )
-                        robot_heatmap_js_loss = _metric_mean(
-                            "robot_heatmap_js_loss_sum",
-                            "robot_heatmap_mask_count",
-                        )
-                        robot_heatmap_token_kl_loss = _metric_mean(
-                            "robot_heatmap_token_kl_loss_sum",
-                            "robot_heatmap_mask_count",
-                        )
                         robot_loss = 0.0
                         if robot_action_loss is not None:
                             robot_loss += (
@@ -3551,47 +3283,7 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                                 float(policy_module.heatmap_loss_weight)
                                 * robot_heatmap_loss
                             )
-                        if robot_heatmap_token_kl_loss is not None:
-                            robot_loss += (
-                                float(policy_module.heatmap_token_kl_loss_weight)
-                                * robot_heatmap_token_kl_loss
-                            )
-                        if getattr(
-                            policy_module,
-                            "heatmap_diffusion_final_loss_enabled",
-                            False,
-                        ):
-                            if robot_heatmap_xy_loss is not None:
-                                robot_loss += (
-                                    float(policy_module.heatmap_xy_loss_weight)
-                                    * robot_heatmap_xy_loss
-                                )
-                            if robot_heatmap_point_nll_loss is not None:
-                                robot_loss += (
-                                    float(policy_module.heatmap_point_nll_loss_weight)
-                                    * robot_heatmap_point_nll_loss
-                                )
-                            if robot_heatmap_js_loss is not None:
-                                robot_loss += (
-                                    float(policy_module.heatmap_js_loss_weight)
-                                    * robot_heatmap_js_loss
-                                )
                         step_log["val_robot_loss"] = robot_loss
-                        step_log["val_robot_heatmap_xy_loss"] = (
-                            robot_heatmap_xy_loss
-                            if robot_heatmap_xy_loss is not None
-                            else 0.0
-                        )
-                        step_log["val_robot_heatmap_js_loss"] = (
-                            robot_heatmap_js_loss
-                            if robot_heatmap_js_loss is not None
-                            else 0.0
-                        )
-                        step_log["val_robot_heatmap_token_kl_loss"] = (
-                            robot_heatmap_token_kl_loss
-                            if robot_heatmap_token_kl_loss is not None
-                            else 0.0
-                        )
                     if val_metrics["open_heatmap_mask_count"] > 0:
                         step_log["val_open_heatmap_loss"] = (
                             val_metrics["open_heatmap_loss_sum"]
@@ -3599,9 +3291,6 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                         )
                     step_log["val_action_mask_count"] = val_metrics["action_mask_count"]
                     step_log["val_heatmap_mask_count"] = val_metrics["heatmap_mask_count"]
-                    step_log["val_heatmap_xy_mask_count"] = val_metrics[
-                        "heatmap_xy_mask_count"
-                    ]
                     step_log["val_robot_action_mask_count"] = val_metrics[
                         "robot_action_mask_count"
                     ]

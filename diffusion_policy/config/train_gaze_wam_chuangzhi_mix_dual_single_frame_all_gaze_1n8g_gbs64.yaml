@@ -2,8 +2,8 @@ defaults:
   - train_gaze_wam_mixed_dual_view_single_frame_workspace
   - _self_
 
-name: train_gaze_wam_chuangzhi_mix_dual_single_frame_1n8g_gbs64
-exp_name: "chuangzhi_mix_dual_shared_vit_temporal_mixed_nll_1n8g_gbs64"
+name: train_gaze_wam_chuangzhi_mix_dual_single_frame_all_gaze_1n8g_gbs64
+exp_name: "chuangzhi_mix_dual_single_frame_all_gaze_latent_1n8g_gbs64"
 
 task:
   n_obs_steps: 1
@@ -14,22 +14,18 @@ task:
   temporal_heatmap_beta: 10.0
   temporal_heatmap_sigma_px: 6.0
   temporal_heatmap_current_weight: 2.0
+  robot_heatmap_supervision: all_valid
 
 policy:
-  heatmap_objective: diffusion
+  model_architecture: cached_dual_stream
   heatmap_loss_weight: 1.0
-  heatmap_token_kl_loss_weight: 0.0
-  # Latent-only ablation: supervise the cached temporal target before decode.
-  heatmap_diffusion_final_loss_enabled: false
-  heatmap_final_loss_timestep_weighting: none
-  heatmap_xy_loss_weight: 0.0
-  heatmap_point_nll_loss_weight: 0.0
-  heatmap_js_loss_weight: 0.0
   obs_encoder:
     share_rgb_model: true
 
 data_mixing:
   total_batch_size_per_process: 8
+  robot_ratio: 0.75
+  open_ratio: 0.25
 
 robot_dataloader:
   batch_size: 6
@@ -44,12 +40,15 @@ val_open_dataloader:
   batch_size: 2
 
 training:
-  # 8 samples/process * 8 processes * 1 accumulation = GBS 64.
   gradient_accumulate_every: 1
+  num_epochs: 1000
+  checkpoint_every: 100
+  latest_checkpoint_every: 1
   measure_step_performance: true
 
 checkpoint:
-  # Robot validation loss is diagnostic; real-world success selects deployments.
+  keep_last_n: 5
+  save_last_ckpt: true
   topk:
     k: 0
 

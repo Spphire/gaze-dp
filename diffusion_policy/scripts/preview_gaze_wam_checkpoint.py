@@ -340,19 +340,10 @@ def preview_gaze_wam_checkpoint(
             }
         )
 
-    heatmap_objective = str(policy.heatmap_objective)
-    latent_mse_loss = heatmap_objective != "dsnt_js"
-    diffusion_final_heatmap_loss = bool(
-        heatmap_objective == "diffusion"
-        and getattr(policy, "heatmap_diffusion_final_loss_enabled", False)
-    )
-    heatmap_supervision = (
-        "full_resolution_dsnt_plus_js_after_frozen_decoder"
-        if heatmap_objective == "dsnt_js"
-        else "latent_diffusion_mse_plus_decoded_final_heatmap_loss"
-        if diffusion_final_heatmap_loss
-        else "latent_diffusion_mse_against_frozen_cosmos_target"
-    )
+    heatmap_objective = "diffusion"
+    latent_mse_loss = True
+    diffusion_final_heatmap_loss = False
+    heatmap_supervision = "latent_diffusion_mse_only"
     temporal_mode = str(cfg.task.get("temporal_heatmap_mode", "off"))
     heatmap_label_source = (
         "temporal_window_dense_heatmap"
@@ -374,21 +365,6 @@ def preview_gaze_wam_checkpoint(
         "heatmap_prediction_mode": str(pred.get("heatmap_prediction_mode", "unknown")),
         "latent_mse_loss": bool(latent_mse_loss),
         "diffusion_final_heatmap_loss": diffusion_final_heatmap_loss,
-        "heatmap_diffusion_final_loss_enabled": bool(
-            getattr(policy, "heatmap_diffusion_final_loss_enabled", False)
-        ),
-        "heatmap_final_loss_timestep_weighting": str(
-            getattr(policy, "heatmap_final_loss_timestep_weighting", "none")
-        ),
-        "heatmap_xy_loss_weight": float(
-            getattr(policy, "heatmap_xy_loss_weight", 0.0)
-        ),
-        "heatmap_point_nll_loss_weight": float(
-            getattr(policy, "heatmap_point_nll_loss_weight", 0.0)
-        ),
-        "heatmap_js_loss_weight": float(
-            getattr(policy, "heatmap_js_loss_weight", 0.0)
-        ),
         "heatmap_distribution_mode": str(
             getattr(policy, "heatmap_distribution_mode", "unknown")
         ),
