@@ -80,6 +80,57 @@ def test_chuangzhi_wrist_mix_is_single_frame_single_view_gbs64():
     assert 8 * 1 * 8 * cfg.training.gradient_accumulate_every == 64
 
 
+def test_chuangzhi_independent_cross_attention_wrist_matches_wrist_run():
+    base = load_cfg("train_gaze_wam_chuangzhi_mix_wrist_single_frame_1n8g_gbs64")
+    cfg = load_cfg(
+        "train_gaze_wam_chuangzhi_independent_cross_attention_mix_wrist_single_frame_1n8g_gbs64"
+    )
+
+    assert cfg.name == (
+        "train_gaze_wam_chuangzhi_independent_cross_attention_mix_wrist_single_frame_1n8g_gbs64"
+    )
+    assert cfg.exp_name == (
+        "chuangzhi_independent_cross_attention_mix_wrist_single_frame_temporal_mixed_nll_1n8g_gbs64"
+    )
+    assert cfg.task == base.task
+    assert cfg.policy == base.policy
+    assert cfg.data_mixing == base.data_mixing
+    assert cfg.robot_dataloader == base.robot_dataloader
+    assert cfg.open_dataloader == base.open_dataloader
+    assert cfg.val_robot_dataloader == base.val_robot_dataloader
+    assert cfg.val_open_dataloader == base.val_open_dataloader
+    assert cfg.training == base.training
+    assert cfg.checkpoint == base.checkpoint
+    assert cfg.logging.project == base.logging.project
+    assert cfg.logging.resume == base.logging.resume is False
+    assert cfg.logging.mode == base.logging.mode == "disabled"
+    assert cfg.logging.id == base.logging.id is None
+    assert cfg.logging.group == base.logging.group is None
+
+
+def test_chuangzhi_independent_cross_attention_wrist_wrapper_is_new_8gpu_run():
+    wrapper = (
+        ROOT
+        / "train_scripts"
+        / "launch_chuangzhi_independent_cross_attention_mix_wrist_single_frame_1n8g_gbs64.sh"
+    )
+    text = wrapper.read_text()
+
+    assert (
+        'export TASK_NAME="independent_cross_attention_mix_wrist_single_frame_temporal_mixed_nll_1n8g_gbs64"'
+        in text
+    )
+    assert (
+        'export CONFIG_NAME="train_gaze_wam_chuangzhi_independent_cross_attention_mix_wrist_single_frame_1n8g_gbs64"'
+        in text
+    )
+    assert 'export ACCELERATE_CONFIG="accelerate/8gpu-amp.yaml"' in text
+    assert "export EXPECTED_NNODES=1" in text
+    assert "export EXPECTED_NPROC_PER_NODE=8" in text
+    assert "launch_gaze_wam_chuangzhi_pet.sh" in text
+    assert "RESUME" not in text
+
+
 def test_chuangzhi_task_names_separate_temporal_mixed_nll_runs():
     wrappers = (
         "launch_chuangzhi_open_pretrain_4n8g_gbs512.sh",
