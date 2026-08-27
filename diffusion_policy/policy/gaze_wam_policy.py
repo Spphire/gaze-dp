@@ -2025,6 +2025,9 @@ class GazeWamPolicy(BaseImagePolicy):
                 cached_target_image = self._heatmap_tokens_to_spatial_image(
                     heatmap[cached_target_mask],
                     "cached heatmap tokens",
+                ).to(
+                    device=target_heatmap_image.device,
+                    dtype=target_heatmap_image.dtype,
                 )
                 target_heatmap_image = target_heatmap_image.clone()
                 target_heatmap_image[cached_target_mask] = cached_target_image
