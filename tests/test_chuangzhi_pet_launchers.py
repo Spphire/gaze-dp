@@ -81,7 +81,9 @@ def test_chuangzhi_wrist_mix_is_single_frame_single_view_gbs64():
 
 
 def test_chuangzhi_independent_cross_attention_wrist_matches_wrist_run():
-    base = load_cfg("train_gaze_wam_chuangzhi_mix_wrist_single_frame_1n8g_gbs64")
+    base = load_cfg(
+        "train_gaze_wam_chuangzhi_mix_wrist_single_frame_all_gaze_heatmap_1n8g_gbs64"
+    )
     cfg = load_cfg(
         "train_gaze_wam_chuangzhi_independent_cross_attention_mix_wrist_single_frame_1n8g_gbs64"
     )
@@ -106,6 +108,9 @@ def test_chuangzhi_independent_cross_attention_wrist_matches_wrist_run():
     assert cfg.logging.mode == base.logging.mode == "disabled"
     assert cfg.logging.id == base.logging.id is None
     assert cfg.logging.group == base.logging.group is None
+    assert cfg.task.robot_heatmap_supervision == "all_valid"
+    assert cfg.training.init_checkpoint == base.training.init_checkpoint
+    assert cfg.training.checkpoint_every == base.training.checkpoint_every == 100
 
 
 def test_chuangzhi_independent_cross_attention_wrist_wrapper_is_new_8gpu_run():
@@ -127,8 +132,11 @@ def test_chuangzhi_independent_cross_attention_wrist_wrapper_is_new_8gpu_run():
     assert 'export ACCELERATE_CONFIG="accelerate/8gpu-amp.yaml"' in text
     assert "export EXPECTED_NNODES=1" in text
     assert "export EXPECTED_NPROC_PER_NODE=8" in text
+    assert 'export RESUME=false' in text
+    assert "job-0ee2b0f1-13e4-4b28-837f-726f4afef1dc-worker-0_23456" in text
+    assert "export INIT_CHECKPOINT=" in text
+    assert "export GAZE_WAM_HEATMAP_CACHE_ROOT=" in text
     assert "launch_gaze_wam_chuangzhi_pet.sh" in text
-    assert "RESUME" not in text
 
 
 def test_chuangzhi_task_names_separate_temporal_mixed_nll_runs():
