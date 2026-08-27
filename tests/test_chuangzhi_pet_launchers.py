@@ -139,6 +139,33 @@ def test_chuangzhi_independent_cross_attention_wrist_wrapper_is_new_8gpu_run():
     assert "launch_gaze_wam_chuangzhi_pet.sh" in text
 
 
+def test_chuangzhi_independent_cross_attention_wrist_2n16g_keeps_gbs64():
+    cfg = load_cfg(
+        "train_gaze_wam_chuangzhi_independent_cross_attention_mix_wrist_single_frame_2n16g_gbs64"
+    )
+    assert cfg.task.robot_heatmap_supervision == "all_valid"
+    assert cfg.data_mixing.total_batch_size_per_process == 4
+    assert cfg.robot_dataloader.batch_size == 3
+    assert cfg.open_dataloader.batch_size == 1
+    assert cfg.val_robot_dataloader.batch_size == 3
+    assert cfg.val_open_dataloader.batch_size == 1
+    assert cfg.training.gradient_accumulate_every == 1
+    assert 4 * 2 * 8 * cfg.training.gradient_accumulate_every == 64
+    assert cfg.training.checkpoint_every == 100
+
+    wrapper = (
+        ROOT
+        / "train_scripts"
+        / "launch_chuangzhi_independent_cross_attention_mix_wrist_single_frame_2n16g_gbs64.sh"
+    )
+    text = wrapper.read_text()
+    assert 'export ACCELERATE_CONFIG="accelerate/2node-16gpu-deepspeed-bf16.yaml"' in text
+    assert "export EXPECTED_NNODES=2" in text
+    assert "export EXPECTED_NPROC_PER_NODE=8" in text
+    assert 'export RESUME=false' in text
+    assert 'export INIT_CHECKPOINT=' in text
+
+
 def test_chuangzhi_task_names_separate_temporal_mixed_nll_runs():
     wrappers = (
         "launch_chuangzhi_open_pretrain_4n8g_gbs512.sh",
