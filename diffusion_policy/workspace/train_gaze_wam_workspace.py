@@ -17,6 +17,7 @@ import pickle
 import random
 import shutil
 import time
+import uuid
 from typing import Optional
 
 import cv2
@@ -199,6 +200,24 @@ def _retain_deepspeed_state_checkpoints(checkpoint_dir, keep_last_n):
     )
     for stale_path in paths[keep_last_n:]:
         shutil.rmtree(stale_path)
+
+
+def _archive_workspace_checkpoint(checkpoint_path, epoch, global_step):
+    """Publish a permanent epoch/step checkpoint beside ``latest.ckpt``."""
+    checkpoint_path = pathlib.Path(checkpoint_path)
+    archive_path = checkpoint_path.parent.joinpath(
+        f"archive-epoch={int(epoch):04d}-step={int(global_step):08d}.ckpt"
+    )
+    temp_path = checkpoint_path.parent.joinpath(
+        f".{archive_path.name}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        shutil.copy2(checkpoint_path, temp_path)
+        os.replace(temp_path, archive_path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+    return str(archive_path)
 
 
 def _planned_prepared_epoch_batches(dataloader, accelerator) -> int:
@@ -1719,6 +1738,12 @@ def _build_training_contract_summary(
             "checkpoint_every_optimizer_steps": training_config[
                 "checkpoint_every_steps"
             ],
+            "latest_checkpoint_every_epochs": training_config[
+                "latest_checkpoint_every"
+            ],
+            "latest_checkpoint_every_optimizer_steps": training_config[
+                "latest_checkpoint_every_steps"
+            ],
             "validation_primary_source": (
                 "robot"
                 if use_robot_data
@@ -2854,8 +2879,19 @@ class TrainGazeWamWorkspace(BaseWorkspace):
         if self.ema_model is not None:
             self.ema_model.to(device)
 
-        def save_recovery_checkpoint(retain_rolling: bool = True):
-            """Save native state plus latest, optionally retaining an archive copy."""
+        def save_recovery_checkpoint(
+            retain_rolling: bool = True,
+            archive_checkpoint: bool = False,
+        ):
+            """Save recovery state, optionally publishing a permanent archive.
+
+            ``latest.ckpt`` and the ``rolling-*`` files are recovery artifacts;
+            rolling retention is independent of validation/top-k checkpoints.
+            An archive is copied only after the asynchronous latest save has
+            completed, so it is an exact portable snapshot without serializing
+            the model a second time.
+            """
+            latest_checkpoint_path = None
             if is_deepspeed and save_deepspeed_state:
                 deepspeed_state_path = _deepspeed_state_checkpoint_path(
                     self.output_dir,
@@ -2879,7 +2915,7 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                 self.model = accelerator.unwrap_model(self.model)
                 try:
                     if cfg.checkpoint.save_last_ckpt:
-                        self.save_checkpoint(
+                        latest_checkpoint_path = self.save_checkpoint(
                             exclude_keys=_workspace_checkpoint_exclude_keys(
                                 self,
                                 is_deepspeed=is_deepspeed,
@@ -2902,6 +2938,14 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                         self.save_snapshot()
                 finally:
                     self.model = model_ddp
+
+                if archive_checkpoint and latest_checkpoint_path is not None:
+                    self.wait_for_pending_checkpoint()
+                    _archive_workspace_checkpoint(
+                        latest_checkpoint_path,
+                        epoch=self.epoch,
+                        global_step=self.global_step,
+                    )
 
         already_at_max_train_steps = (
             cfg.training.max_train_steps is not None
@@ -3122,7 +3166,8 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                             )
                             if latest_checkpoint_due or archival_checkpoint_due:
                                 save_recovery_checkpoint(
-                                    retain_rolling=archival_checkpoint_due
+                                    retain_rolling=True,
+                                    archive_checkpoint=archival_checkpoint_due,
                                 )
                             if measure_step_performance:
                                 performance_window_started_at = time.perf_counter()
@@ -3595,8 +3640,15 @@ class TrainGazeWamWorkspace(BaseWorkspace):
                     completed_steps=self.global_step,
                     checkpoint_every_steps=cfg.training.checkpoint_every_steps,
                 )
-                if checkpoint_due:
-                    save_recovery_checkpoint()
+                latest_epoch_checkpoint_due = (
+                    cfg.training.latest_checkpoint_every is not None
+                    and self.epoch % int(cfg.training.latest_checkpoint_every) == 0
+                )
+                if latest_epoch_checkpoint_due or checkpoint_due:
+                    save_recovery_checkpoint(
+                        retain_rolling=True,
+                        archive_checkpoint=checkpoint_due,
+                    )
                     if (
                         cfg.training.get("save_checkpoint_heatmap_preview", True)
                         and accelerator.is_main_process

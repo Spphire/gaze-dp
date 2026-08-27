@@ -185,6 +185,9 @@ training:
   freeze_encoder: false
   checkpoint_every: 1
   checkpoint_every_steps: null
+  # Optional epoch cadence for rolling recovery checkpoints.  When unset,
+  # recovery checkpoints follow the archival cadence above.
+  latest_checkpoint_every: null
   latest_checkpoint_every_steps: null
   val_every: 1
   max_val_steps: null

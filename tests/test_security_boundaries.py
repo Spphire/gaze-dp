@@ -16,6 +16,9 @@ from diffusion_policy.model.common.normalizer import (
     SingleFieldLinearNormalizer,
 )
 from diffusion_policy.workspace.base_workspace import BaseWorkspace
+from diffusion_policy.workspace.train_gaze_wam_workspace import (
+    _archive_workspace_checkpoint,
+)
 
 
 class _CheckpointWorkspace(BaseWorkspace):
@@ -151,6 +154,25 @@ def test_workspace_keeps_only_the_requested_rolling_checkpoints(tmp_path):
         checkpoint_dir / "latest.ckpt", trust_checkpoint=True
     )
     assert restored.value == 7
+
+
+def test_workspace_archive_checkpoint_is_permanent_and_distinct_from_rolling(tmp_path):
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+    latest_path = checkpoint_dir / "latest.ckpt"
+    latest_path.write_bytes(b"checkpoint-payload")
+
+    archive_path = _archive_workspace_checkpoint(
+        latest_path,
+        epoch=100,
+        global_step=12345,
+    )
+
+    assert archive_path.endswith("archive-epoch=0100-step=00012345.ckpt")
+    assert (checkpoint_dir / "archive-epoch=0100-step=00012345.ckpt").read_bytes() == (
+        b"checkpoint-payload"
+    )
+    assert list(checkpoint_dir.glob("rolling-*.ckpt")) == []
 
 
 def test_workspace_failed_atomic_save_preserves_previous_latest(tmp_path, monkeypatch):

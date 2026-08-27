@@ -152,6 +152,7 @@ def test_chuangzhi_independent_cross_attention_wrist_2n16g_keeps_gbs64():
     assert cfg.training.gradient_accumulate_every == 1
     assert 4 * 2 * 8 * cfg.training.gradient_accumulate_every == 64
     assert cfg.training.checkpoint_every == 100
+    assert cfg.training.latest_checkpoint_every == 1
 
     wrapper = (
         ROOT

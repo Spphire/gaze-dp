@@ -21,3 +21,7 @@ val_robot_dataloader:
 
 val_open_dataloader:
   batch_size: 1
+
+training:
+  # Keep the latest five portable/native recovery states independent of val loss.
+  latest_checkpoint_every: 1

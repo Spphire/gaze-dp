@@ -10,4 +10,6 @@ task:
 
 training:
   init_checkpoint: data/outputs/chuangzhi/mix_dual_shared_vit_temporal_mixed_nll_1n8g_gbs64/job-0bc4dab9-08f0-4540-aa4f-8b9855be740d-worker-0_23456/checkpoints/latest.ckpt
+  # Recovery retention is independent of validation/top-k checkpoint selection.
+  latest_checkpoint_every: 1
   checkpoint_every: 100
