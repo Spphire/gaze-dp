@@ -168,9 +168,24 @@ def _capture_forward_factory(branch_map, records, state):
                 "gaze_weight_mean": float(gaze_attn.detach().float().mean().item()),
                 "gaze_weight_min": float(gaze_attn.detach().float().amin().item()),
                 "gaze_weight_max": float(gaze_attn.detach().float().amax().item()),
+                "gaze_weight_by_head": gaze_attn.detach()
+                .float()
+                .mean(dim=(0, 2, 3))
+                .cpu()
+                .tolist(),
                 "gaze_context_norm": float(gaze_context.detach().float().norm(dim=-1).mean().item()),
                 "image_weight_mean": float(image_attn.detach().float().mean().item()),
+                "image_weight_by_head": image_attn.detach()
+                .float()
+                .mean(dim=(0, 2, 3))
+                .cpu()
+                .tolist(),
                 "target_weight_mean": float(target_attn.detach().float().mean().item()),
+                "target_weight_by_head": target_attn.detach()
+                .float()
+                .mean(dim=(0, 2, 3))
+                .cpu()
+                .tolist(),
                 "target_key_count": int(target_key.shape[2]),
                 "image_key_count": int(image_cache_key.shape[2]),
                 "gaze_key_count": int(gaze_cache_key.shape[2]),
@@ -205,6 +220,13 @@ def _aggregate_attention(records: Iterable[Dict[str, object]]) -> List[Dict[str,
             "target_weight_mean",
         ):
             row[name] = float(np.mean([float(item[name]) for item in rows]))
+        for name in (
+            "gaze_weight_by_head",
+            "image_weight_by_head",
+            "target_weight_by_head",
+        ):
+            head_values = np.asarray([item[name] for item in rows], dtype=np.float64)
+            row[name] = head_values.mean(axis=0).tolist()
         row["image_key_count"] = int(rows[0]["image_key_count"])
         row["gaze_key_count"] = int(rows[0]["gaze_key_count"])
         row["target_key_count"] = int(rows[0]["target_key_count"])
@@ -388,6 +410,22 @@ def main() -> None:
         "action_shift_gaze_kv_zero_mean": float(_l2_rows(action_tensors["gt_gaze"].reshape(args.count, -1), action_tensors["gt_gaze_gaze_kv_zero"].reshape(args.count, -1)).mean().item()),
         "heatmap_shift_gaze_kv_zero_mean": float(_l2_rows(peak_tensors["gt_gaze"], peak_tensors["gt_gaze_gaze_kv_zero"]).mean().item()),
     }
+    recorded_gaze = torch.tensor(
+        predictions["gt_gaze"]["gaze_xy"],
+        dtype=torch.float32,
+    )
+    for mode in ("image_only", "gt_gaze", "arbitrary_gaze"):
+        metrics[f"heatmap_peak_to_recorded_gaze_{mode}_mean"] = float(
+            _l2_rows(peak_tensors[mode], recorded_gaze).mean().item()
+        )
+        metrics[f"heatmap_peak_to_supplied_gaze_{mode}_mean"] = float(
+            _l2_rows(
+                peak_tensors[mode],
+                torch.tensor(predictions[mode]["gaze_xy"], dtype=torch.float32),
+            )
+            .mean()
+            .item()
+        )
     metrics.update(heatmap_l1)
 
     repository_commit = _repository_commit(Path(__file__).resolve().parents[1])
