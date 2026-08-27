@@ -41,9 +41,10 @@ class Fp32LayerNorm(nn.LayerNorm):
 
 @dataclass(frozen=True)
 class GazeWamWorldCache:
-    """Per-layer heatmap/world-expert K/V cache consumed by action denoising."""
+    """Per-layer image and gaze K/V caches consumed by target decoders."""
 
-    key_values: Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
+    image_key_values: Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
+    gaze_key_values: Tuple[Tuple[torch.Tensor, torch.Tensor], ...]
     num_image_tokens: int
     batch_size: int
 
@@ -85,6 +86,8 @@ class ContextSelfBlock(nn.Module):
         self.value = nn.Linear(n_emb, n_emb)
         self.out = nn.Linear(n_emb, n_emb)
         self.attn_drop = nn.Dropout(p_drop_attn)
+        # A single gaze source token must not be dropped as a whole branch.
+        self.gaze_attn_drop = nn.Identity()
         self.resid_drop = nn.Dropout(p_drop_attn)
         self.ln_mlp = Fp32LayerNorm(n_emb)
         self.mlp = FeedForwardBlock(n_emb=n_emb, p_drop=p_drop_attn)
@@ -112,7 +115,14 @@ class ContextSelfBlock(nn.Module):
 
 
 class CachedMixedAttention(nn.Module):
-    """Target mixed attention over cached world K/V plus current target K/V."""
+    """Target attention with separate target, image, and gaze softmaxes.
+
+    The previous implementation concatenated image, gaze, and target K/V before
+    one softmax.  That made the single gaze token compete with hundreds of
+    visual/target tokens.  Each source now gets its own normalized attention
+    distribution, and the resulting value contexts are fused before the output
+    projection.  The parameter names remain compatible with existing weights.
+    """
 
     def __init__(self, n_emb: int, n_head: int, p_drop_attn: float) -> None:
         super().__init__()
@@ -137,19 +147,34 @@ class CachedMixedAttention(nn.Module):
     def forward(
         self,
         target_tokens: torch.Tensor,
-        cache_key: torch.Tensor,
-        cache_value: torch.Tensor,
+        image_cache_key: torch.Tensor,
+        image_cache_value: torch.Tensor,
+        gaze_cache_key: torch.Tensor,
+        gaze_cache_value: torch.Tensor,
     ) -> torch.Tensor:
         query = self._reshape_heads(self.query(target_tokens))
         target_key = self._reshape_heads(self.key(target_tokens))
         target_value = self._reshape_heads(self.value(target_tokens))
-        key = torch.cat([cache_key, target_key], dim=2)
-        value = torch.cat([cache_value, target_value], dim=2)
-        attn = torch.matmul(query, key.transpose(-2, -1)) * self.scale
-        attn = F.softmax(attn, dim=-1)
-        attn = self.attn_drop(attn)
-        out = torch.matmul(attn, value)
-        return self.resid_drop(self.out(self._merge_heads(out)))
+
+        def attend(
+            key: torch.Tensor,
+            value: torch.Tensor,
+            dropout: nn.Module,
+        ) -> torch.Tensor:
+            attn = torch.matmul(query, key.transpose(-2, -1)) * self.scale
+            attn = F.softmax(attn, dim=-1)
+            attn = dropout(attn)
+            return torch.matmul(attn, value)
+
+        target_context = attend(target_key, target_value, self.attn_drop)
+        image_context = attend(image_cache_key, image_cache_value, self.attn_drop)
+        gaze_context = attend(
+            gaze_cache_key,
+            gaze_cache_value,
+            self.gaze_attn_drop,
+        )
+        fused = target_context + image_context + gaze_context
+        return self.resid_drop(self.out(self._merge_heads(fused)))
 
 
 class TargetDecoderBlock(nn.Module):
@@ -169,13 +194,17 @@ class TargetDecoderBlock(nn.Module):
     def forward(
         self,
         target: torch.Tensor,
-        cache_key: torch.Tensor,
-        cache_value: torch.Tensor,
+        image_cache_key: torch.Tensor,
+        image_cache_value: torch.Tensor,
+        gaze_cache_key: torch.Tensor,
+        gaze_cache_value: torch.Tensor,
     ) -> torch.Tensor:
         target = target + self.mixed_attn(
             target_tokens=self.ln_attn(target),
-            cache_key=cache_key,
-            cache_value=cache_value,
+            image_cache_key=image_cache_key,
+            image_cache_value=image_cache_value,
+            gaze_cache_key=gaze_cache_key,
+            gaze_cache_value=gaze_cache_value,
         )
         return target + self.mlp(self.ln_mlp(target))
 
@@ -453,12 +482,25 @@ class CachedDualStreamGazeWamTransformer(nn.Module):
         context = context + self.context_pos_emb[:, : context.shape[1], :]
         context = self.drop(context)
 
-        key_values: List[Tuple[torch.Tensor, torch.Tensor]] = []
+        image_key_values: List[Tuple[torch.Tensor, torch.Tensor]] = []
+        gaze_key_values: List[Tuple[torch.Tensor, torch.Tensor]] = []
         for block in self.context_blocks:
             context, key, value = block(context)
-            key_values.append((key, value))
+            image_key_values.append(
+                (
+                    key[:, :, :num_image_tokens, :],
+                    value[:, :, :num_image_tokens, :],
+                )
+            )
+            gaze_key_values.append(
+                (
+                    key[:, :, num_image_tokens:, :],
+                    value[:, :, num_image_tokens:, :],
+                )
+            )
         return GazeWamWorldCache(
-            key_values=tuple(key_values),
+            image_key_values=tuple(image_key_values),
+            gaze_key_values=tuple(gaze_key_values),
             num_image_tokens=int(num_image_tokens),
             batch_size=int(image_tokens.shape[0]),
         )
@@ -492,11 +534,25 @@ class CachedDualStreamGazeWamTransformer(nn.Module):
                 "world_cache num_image_tokens must match image_tokens, got "
                 f"{world_cache.num_image_tokens} vs {num_image_tokens}."
             )
-        if len(world_cache.key_values) != self.n_layer:
+        if len(world_cache.image_key_values) != self.n_layer:
             raise ValueError(
-                f"world_cache must contain {self.n_layer} layer K/V pairs, "
-                f"got {len(world_cache.key_values)}."
+                f"world_cache image cache must contain {self.n_layer} layer K/V pairs, "
+                f"got {len(world_cache.image_key_values)}."
             )
+        if len(world_cache.gaze_key_values) != self.n_layer:
+            raise ValueError(
+                f"world_cache gaze cache must contain {self.n_layer} layer K/V pairs, "
+                f"got {len(world_cache.gaze_key_values)}."
+            )
+        for layer, ((image_key, image_value), (gaze_key, gaze_value)) in enumerate(
+            zip(world_cache.image_key_values, world_cache.gaze_key_values)
+        ):
+            if image_key.shape[2] != num_image_tokens or gaze_key.shape[2] != 1:
+                raise ValueError(
+                    "world_cache layer "
+                    f"{layer} must contain {num_image_tokens} image and 1 gaze token, "
+                    f"got {image_key.shape[2]} image and {gaze_key.shape[2]} gaze tokens."
+                )
 
     def _validate_condition_cache(
         self,
@@ -621,16 +677,34 @@ class CachedDualStreamGazeWamTransformer(nn.Module):
             )
         else:
             action_features = self._prepare_action_tokens(noisy_action, time_emb)
-            for block, (key, value) in zip(self.action_blocks, world_cache.key_values):
-                action_features = block(action_features, key, value)
+            for block, (image_kv, gaze_kv) in zip(
+                self.action_blocks,
+                zip(world_cache.image_key_values, world_cache.gaze_key_values),
+            ):
+                action_features = block(
+                    action_features,
+                    image_cache_key=image_kv[0],
+                    image_cache_value=image_kv[1],
+                    gaze_cache_key=gaze_kv[0],
+                    gaze_cache_value=gaze_kv[1],
+                )
             pred_action = self.action_head(self.action_ln_f(action_features))
 
         pred_heatmap = None
         heatmap_features = None
         if include_heatmap:
             heatmap_features = self._prepare_heatmap_tokens(noisy_heatmap, time_emb)
-            for block, (key, value) in zip(self.heatmap_blocks, world_cache.key_values):
-                heatmap_features = block(heatmap_features, key, value)
+            for block, (image_kv, gaze_kv) in zip(
+                self.heatmap_blocks,
+                zip(world_cache.image_key_values, world_cache.gaze_key_values),
+            ):
+                heatmap_features = block(
+                    heatmap_features,
+                    image_cache_key=image_kv[0],
+                    image_cache_value=image_kv[1],
+                    gaze_cache_key=gaze_kv[0],
+                    gaze_cache_value=gaze_kv[1],
+                )
             pred_heatmap = self.heatmap_head(self.heatmap_ln_f(heatmap_features))
 
         return GazeWamTransformerOutput(
@@ -665,7 +739,10 @@ class CachedDualStreamGazeWamTransformer(nn.Module):
             "inference_action_tokens": int(self.action_horizon),
             "shared_condition_kv_cache": False,
             "shared_world_kv_cache": True,
-            "world_cache_source": "image_gaze_condition_prefill_fastwam_first_frame_analogue",
+            "world_cache_source": "separate_image_gaze_prefill_fastwam_first_frame_analogue",
+            "target_attention_mode": "independent_image_gaze_target_softmax",
+            "target_attention_concatenates_image_gaze": False,
+            "gaze_cross_attention_source_tokens": 1,
             "world_cache_consumed_by_action": True,
             "action_reads_heatmap_world_cache": True,
             "condition_reads_targets": False,

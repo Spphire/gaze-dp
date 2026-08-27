@@ -134,8 +134,13 @@ def main(argv=None) -> int:
         ),
         "batch_size": int(args.batch_size),
         "image_tokens": int(args.image_tokens),
-        "world_cache_layers": len(world_cache.key_values),
-        "world_cache_key_shape": [int(v) for v in world_cache.key_values[0][0].shape],
+        "world_cache_layers": len(world_cache.image_key_values),
+        "world_cache_image_key_shape": [
+            int(v) for v in world_cache.image_key_values[0][0].shape
+        ],
+        "world_cache_gaze_key_shape": [
+            int(v) for v in world_cache.gaze_key_values[0][0].shape
+        ],
         "action_shape": [int(v) for v in train_out.action.shape],
         "heatmap_token_shape": [int(v) for v in train_out.heatmap.shape],
         "inference_action_shape": [int(v) for v in infer_out.action.shape],

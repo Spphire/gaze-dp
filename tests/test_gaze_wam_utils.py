@@ -1328,11 +1328,16 @@ def test_cached_dual_stream_transformer_shapes_and_world_cache():
 
     cache = model.prefill_world_cache(image_tokens=image_tokens, gaze_token=gaze_token)
     legacy_cache = model.prefill_condition_cache(image_tokens=image_tokens, gaze_token=gaze_token)
-    assert len(cache.key_values) == 2
-    assert len(legacy_cache.key_values) == 2
-    first_key, first_value = cache.key_values[0]
-    assert first_key.shape == (2, 4, 9, 8)
-    assert first_value.shape == (2, 4, 9, 8)
+    assert len(cache.image_key_values) == 2
+    assert len(cache.gaze_key_values) == 2
+    assert len(legacy_cache.image_key_values) == 2
+    assert len(legacy_cache.gaze_key_values) == 2
+    first_image_key, first_image_value = cache.image_key_values[0]
+    first_gaze_key, first_gaze_value = cache.gaze_key_values[0]
+    assert first_image_key.shape == (2, 4, 8, 8)
+    assert first_image_value.shape == (2, 4, 8, 8)
+    assert first_gaze_key.shape == (2, 4, 1, 8)
+    assert first_gaze_value.shape == (2, 4, 1, 8)
 
     train_out = model(
         image_tokens=image_tokens,
@@ -1362,6 +1367,9 @@ def test_cached_dual_stream_transformer_shapes_and_world_cache():
     assert summary["architecture"] == "cached_dual_stream"
     assert summary["shared_condition_kv_cache"] is False
     assert summary["shared_world_kv_cache"] is True
+    assert summary["target_attention_mode"] == "independent_image_gaze_target_softmax"
+    assert summary["target_attention_concatenates_image_gaze"] is False
+    assert summary["gaze_cross_attention_source_tokens"] == 1
     assert summary["world_cache_consumed_by_action"] is True
     assert summary["action_reads_heatmap_world_cache"] is True
     assert summary["action_reads_noisy_heatmap"] is False
