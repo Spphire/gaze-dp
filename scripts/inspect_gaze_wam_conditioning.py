@@ -268,10 +268,10 @@ def main() -> None:
             state["disable_gaze"] = False
             obs = _condition_obs(base_obs, mode, gaze)
             with torch.no_grad():
+                torch.manual_seed(1234)
                 action = policy.predict_action(
                     obs,
                     cfg_scale=1.0,
-                    generator=torch.Generator(device=device).manual_seed(1234),
                 )["action_pred_relative"]
                 heatmap_result = policy.predict_heatmap(
                     obs,
@@ -291,10 +291,10 @@ def main() -> None:
         state["condition"] = "gt_gaze"
         state["disable_gaze"] = True
         with torch.no_grad():
+            torch.manual_seed(1234)
             ablated_action = policy.predict_action(
                 _condition_obs(base_obs, "gt_gaze", real_gaze),
                 cfg_scale=1.0,
-                generator=torch.Generator(device=device).manual_seed(1234),
             )["action_pred_relative"]
             ablated_heatmap = policy.predict_heatmap(
                 _condition_obs(base_obs, "gt_gaze", real_gaze),
