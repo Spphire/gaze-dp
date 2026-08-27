@@ -86,8 +86,6 @@ class ContextSelfBlock(nn.Module):
         self.value = nn.Linear(n_emb, n_emb)
         self.out = nn.Linear(n_emb, n_emb)
         self.attn_drop = nn.Dropout(p_drop_attn)
-        # A single gaze source token must not be dropped as a whole branch.
-        self.gaze_attn_drop = nn.Identity()
         self.resid_drop = nn.Dropout(p_drop_attn)
         self.ln_mlp = Fp32LayerNorm(n_emb)
         self.mlp = FeedForwardBlock(n_emb=n_emb, p_drop=p_drop_attn)
@@ -134,6 +132,8 @@ class CachedMixedAttention(nn.Module):
         self.value = nn.Linear(n_emb, n_emb)
         self.out = nn.Linear(n_emb, n_emb)
         self.attn_drop = nn.Dropout(p_drop_attn)
+        # A single gaze source token must not be dropped as a whole branch.
+        self.gaze_attn_drop = nn.Identity()
         self.resid_drop = nn.Dropout(p_drop_attn)
 
     def _reshape_heads(self, x: torch.Tensor) -> torch.Tensor:
