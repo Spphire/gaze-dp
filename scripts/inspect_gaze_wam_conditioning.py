@@ -158,6 +158,42 @@ def _capture_forward_factory(branch_map, records, state):
         if state["disable_gaze"]:
             gaze_context = torch.zeros_like(gaze_context)
 
+        context_norms = {
+            "target": float(target_context.detach().float().norm(dim=-1).mean().item()),
+            "image": float(image_context.detach().float().norm(dim=-1).mean().item()),
+            "gaze": float(gaze_context.detach().float().norm(dim=-1).mean().item()),
+        }
+        context_norm_total = sum(context_norms.values())
+        context_ratios = {
+            f"{name}_context_ratio": (
+                value / context_norm_total if context_norm_total > 0.0 else 0.0
+            )
+            for name, value in context_norms.items()
+        }
+
+        # The final projection is shared, so measure each branch through its
+        # weight without repeatedly adding the projection bias.
+        def projected_norm(context):
+            projected = F.linear(
+                self._merge_heads(context),
+                self.out.weight,
+                bias=None,
+            )
+            return float(projected.detach().float().norm(dim=-1).mean().item())
+
+        projected_norms = {
+            "target": projected_norm(target_context),
+            "image": projected_norm(image_context),
+            "gaze": projected_norm(gaze_context),
+        }
+        projected_norm_total = sum(projected_norms.values())
+        projected_ratios = {
+            f"{name}_projected_ratio": (
+                value / projected_norm_total if projected_norm_total > 0.0 else 0.0
+            )
+            for name, value in projected_norms.items()
+        }
+
         branch, layer = branch_map.get(id(self), ("unknown", -1))
         records.append(
             {
@@ -174,6 +210,15 @@ def _capture_forward_factory(branch_map, records, state):
                 .cpu()
                 .tolist(),
                 "gaze_context_norm": float(gaze_context.detach().float().norm(dim=-1).mean().item()),
+                "target_context_norm": context_norms["target"],
+                "image_context_norm": context_norms["image"],
+                "context_norm_total": context_norm_total,
+                **context_ratios,
+                "target_projected_norm": projected_norms["target"],
+                "image_projected_norm": projected_norms["image"],
+                "gaze_projected_norm": projected_norms["gaze"],
+                "projected_norm_total": projected_norm_total,
+                **projected_ratios,
                 "image_weight_mean": float(image_attn.detach().float().mean().item()),
                 "image_weight_by_head": image_attn.detach()
                 .float()
@@ -216,6 +261,19 @@ def _aggregate_attention(records: Iterable[Dict[str, object]]) -> List[Dict[str,
             "gaze_weight_min",
             "gaze_weight_max",
             "gaze_context_norm",
+            "target_context_norm",
+            "image_context_norm",
+            "context_norm_total",
+            "target_context_ratio",
+            "image_context_ratio",
+            "gaze_context_ratio",
+            "target_projected_norm",
+            "image_projected_norm",
+            "gaze_projected_norm",
+            "projected_norm_total",
+            "target_projected_ratio",
+            "image_projected_ratio",
+            "gaze_projected_ratio",
             "image_weight_mean",
             "target_weight_mean",
         ):
