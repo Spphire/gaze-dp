@@ -14,6 +14,9 @@ CONFIGS = {
         "script": "launch_chuangzhi_open_pretrain_1n8g_gbs64.sh",
         "robot_batch": 0,
         "open_batch": 8,
+        "robot_ratio": 0.0,
+        "open_ratio": 1.0,
+        "gaze_dropout": 0.2,
         "share_rgb": False,
         "epochs": 3000,
     },
@@ -21,6 +24,9 @@ CONFIGS = {
         "script": "launch_chuangzhi_mix_wrist_single_frame_all_gaze_1n8g_gbs64.sh",
         "robot_batch": 6,
         "open_batch": 2,
+        "robot_ratio": 0.75,
+        "open_ratio": 0.25,
+        "gaze_dropout": 0.2,
         "share_rgb": False,
         "epochs": 1000,
     },
@@ -28,7 +34,21 @@ CONFIGS = {
         "script": "launch_chuangzhi_mix_dual_single_frame_all_gaze_1n8g_gbs64.sh",
         "robot_batch": 6,
         "open_batch": 2,
+        "robot_ratio": 0.75,
+        "open_ratio": 0.25,
+        "gaze_dropout": 0.2,
         "share_rgb": True,
+        "epochs": 1000,
+    },
+    "train_gaze_wam_chuangzhi_robot_wrist_single_frame_always_gaze_1n8g_gbs64": {
+        "script": "launch_chuangzhi_robot_wrist_single_frame_always_gaze_1n8g_gbs64.sh",
+        "robot_batch": 8,
+        "open_batch": 0,
+        "robot_ratio": 1.0,
+        "open_ratio": 0.0,
+        "gaze_dropout": 0.0,
+        "stage": "robot_only",
+        "share_rgb": False,
         "epochs": 1000,
     },
 }
@@ -39,12 +59,12 @@ def load_cfg(name):
         return compose(config_name=name)
 
 
-def test_only_three_formal_chuangzhi_configs_remain():
+def test_only_formal_chuangzhi_configs_remain():
     names = sorted(p.stem for p in CONFIG_DIR.glob("train_gaze_wam_chuangzhi_*.yaml"))
     assert names == sorted(CONFIGS)
 
 
-def test_three_configs_are_single_node_gbs64_latent_only_all_gaze():
+def test_configs_are_single_node_gbs64_latent_only_all_gaze():
     for name, expected in CONFIGS.items():
         cfg = load_cfg(name)
         assert cfg.policy.model_architecture == "cached_dual_stream"
@@ -57,6 +77,11 @@ def test_three_configs_are_single_node_gbs64_latent_only_all_gaze():
         assert cfg.data_mixing.total_batch_size_per_process == 8
         assert cfg.robot_dataloader.batch_size == expected["robot_batch"]
         assert cfg.open_dataloader.batch_size == expected["open_batch"]
+        assert cfg.data_mixing.robot_ratio == expected["robot_ratio"]
+        assert cfg.data_mixing.open_ratio == expected["open_ratio"]
+        assert cfg.task.robot_gaze_dropout_prob == expected["gaze_dropout"]
+        if "stage" in expected:
+            assert cfg.training.stage == expected["stage"]
         assert cfg.training.gradient_accumulate_every == 1
         assert cfg.training.num_epochs == expected["epochs"]
         assert cfg.policy.obs_encoder.share_rgb_model is expected["share_rgb"]

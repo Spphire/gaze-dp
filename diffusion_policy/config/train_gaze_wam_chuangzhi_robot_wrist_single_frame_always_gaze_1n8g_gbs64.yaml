@@ -1,0 +1,59 @@
+defaults:
+  - train_gaze_wam_mixed_single_view_single_frame_workspace
+  - _self_
+
+name: train_gaze_wam_chuangzhi_robot_wrist_single_frame_always_gaze_1n8g_gbs64
+exp_name: "chuangzhi_robot_wrist_single_frame_always_gaze_latent_1n8g_gbs64"
+
+task:
+  n_obs_steps: 1
+  camera_key: camera0_rgb
+  camera_keys: [camera0_rgb]
+  heatmap_key: null
+  temporal_heatmap_mode: bidirectional
+  temporal_heatmap_window_radius: 30
+  temporal_heatmap_beta: 10.0
+  temporal_heatmap_sigma_px: 6.0
+  temporal_heatmap_current_weight: 2.0
+  robot_gaze_dropout_prob: 0.0
+  robot_heatmap_supervision: all_valid
+
+policy:
+  model_architecture: cached_dual_stream
+  heatmap_loss_weight: 1.0
+  obs_encoder:
+    share_rgb_model: false
+
+data_mixing:
+  total_batch_size_per_process: 8
+  robot_ratio: 1.0
+  open_ratio: 0.0
+
+robot_dataloader:
+  batch_size: 8
+
+open_dataloader:
+  batch_size: 0
+
+val_robot_dataloader:
+  batch_size: 8
+
+val_open_dataloader:
+  batch_size: 0
+
+training:
+  stage: robot_only
+  gradient_accumulate_every: 1
+  num_epochs: 1000
+  checkpoint_every: 100
+  latest_checkpoint_every: 1
+  measure_step_performance: true
+
+checkpoint:
+  keep_last_n: 5
+  save_last_ckpt: true
+  topk:
+    k: 0
+
+logging:
+  mode: disabled
